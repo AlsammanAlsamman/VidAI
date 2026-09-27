@@ -3,13 +3,22 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vidai"
-version = "0.1.0"
-description = "A Claude video-editing plugin: anchors, edit tools, and self-trained small models"
+name = "vidai-rec"
+version = "0.2.1"
+description = "Record, understand and improve your videos by talking to Claude (under development)"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "AlsammanAlsamman", email = "sammanmahmoud@gmail.com" }]
 maintainers = [{ name = "AlsammanAlsamman", email = "sammanmahmoud@gmail.com" }]
+keywords = ["video", "recording", "editing", "claude", "youtube", "speech-to-text", "ffmpeg"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Video :: Capture",
+  "Topic :: Multimedia :: Video :: Non-Linear Editor",
+]
 dependencies = [
   "numpy",
   "pillow",
@@ -28,11 +37,18 @@ arabic = ["arabic-reshaper", "python-bidi"]
 dev = ["pytest"]
 all = ["obsws-python", "pynput", "mcp>=2", "arabic-reshaper", "python-bidi", "pytest"]
 
+[project.urls]
+Homepage = "https://github.com/AlsammanAlsamman/VidAI"
+Issues = "https://github.com/AlsammanAlsamman/VidAI/issues"
+
 [project.scripts]
 vidai = "vidai.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["vidai*"]
+
+[tool.setuptools.package-data]
+vidai = ["assets/*.png", "native/*.c"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

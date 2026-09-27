@@ -17,3 +17,6 @@ PLAN.md
 *.part-video.mkv
 *.part-audio.mka
 video.damaged.mkv
+
+dist/
+build/

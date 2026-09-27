@@ -39,7 +39,7 @@ MARKS = [("◆  Marker", "marker", "m", ACCENT_2), ("✂  Mistake", "mistake", "
          ("§  Section", "section", "n", ACCENT), ("★  Important", "important", "i", REC)]
 PREVIEW_W, PREVIEW_H = 480, 270
 FONT = "Ubuntu Sans"
-ASSETS = Path(__file__).resolve().parent.parent / "assets"
+ASSETS = Path(__file__).resolve().parent / "assets"  # icons ship inside the package
 
 
 def _pil_font(size: int, bold: bool = True):

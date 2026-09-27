@@ -352,7 +352,7 @@ class Thinking(LiveProcessor):
         from PIL import Image as PILImage
         from PIL import ImageDraw
 
-        path = self.params["icon"] or str(Path(__file__).resolve().parents[2] / "assets" / "icon.png")
+        path = self.params["icon"] or str(Path(__file__).resolve().parents[1] / "assets" / "icon.png")
         icon = PILImage.open(path).convert("RGBA")
         iw = max(24, int(self.params["size"] * W))
         ih = int(icon.height * iw / icon.width)
