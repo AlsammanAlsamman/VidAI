@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidai"
+version = "0.1.0"
+description = "A Claude video-editing plugin: anchors, edit tools, and self-trained small models"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "AlsammanAlsamman", email = "sammanmahmoud@gmail.com" }]
+maintainers = [{ name = "AlsammanAlsamman", email = "sammanmahmoud@gmail.com" }]
+dependencies = [
+  "numpy",
+  "pillow",
+  "pydantic>=2",
+  "imageio-ffmpeg",
+  "opencv-python-headless",
+  "customtkinter",
+  "faster-whisper",
+  "rapidocr-onnxruntime",
+]
+
+[project.optional-dependencies]
+record = ["obsws-python", "pynput"]
+mcp = ["mcp>=2"]
+arabic = ["arabic-reshaper", "python-bidi"]
+dev = ["pytest"]
+all = ["obsws-python", "pynput", "mcp>=2", "arabic-reshaper", "python-bidi", "pytest"]
+
+[project.scripts]
+vidai = "vidai.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vidai*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: runs Whisper on real speech (downloads a model on first run)"]

@@ -1,0 +1,88 @@
+"""The live-processing guide Claude reads (tool: live_guide). Keep it short, concrete and complete."""
+
+GUIDE = {
+"overview": """VidAI live processing — two loops while recording:
+FAST LOOP (every frame, ms): processors change the video, rules react to live stats, voice commands act,
+instant models classify frames. Runs inside the recorder; never waits for you.
+SLOW LOOP (you, seconds): read the stats stream with live_stats(session, since=<next>), decide, then send
+commands with live_control(session, [...]) or write new processors with live_processor(session, name, code).
+Poll every ~5-15 s while the user records; react to `claude` events (the user said "VidAI <request>").
+While a request is open, a funny animated VidAI icon shows in the corner of the video ("Claude is thinking").
+live_control(..., done=True) (the default) answers the request and hides it; use done=False for
+intermediate steps, and {"cmd":"thinking","on":true} to show it yourself during longer work.
+Everything live is also saved as anchors (live_action, speech, screen_text, markers...) for editing later.""",
+
+"stats": """Events on the live stream (kind: data):
+silence_start {} / silence_end {duration,start}     speech_start {} / speech_end {duration,start}
+loud {db}                                           scene_change {score}
+transcript {text,start,end,lang,is_command}         voice_command {command,args,text}
+claude {message,source}  <- the user asked YOU something by voice ("VidAI make the title bigger")
+screen_text {text,lines,new_lines}  (OCR, if on)    marker {type,note,source}
+learner {name,label,confidence}                     window_focus {title}
+action {...} what the recorder did                  ack/error {command,...} results of your commands
+perf {fps,frame_ms,active_processors}
+Voice commands built in: "VidAI" + mark | mistake | new section <title> | important | zoom in | zoom out |
+captions on/off | learn <name> | label <value> | wrong | stop | anything else -> claude event. Arabic works too
+(فيداي علامة / خطأ / قسم جديد ... / مهم / تكبير / تصغير / إيقاف).""",
+
+"commands": """live_control commands (JSON objects, "for": seconds makes anything temporary):
+{"cmd":"text","text":"...","position":"top-left|bottom-center|[x,y]","size":0.05,"color":"#fff","box":"#000A","for":4}
+{"cmd":"shape","shape":"arrow|circle|box","x":.5,"y":.5,"w":.15,"h":.15,"angle":225,"color":"#FF3B30","for":3}
+{"cmd":"image","path":"/abs/logo.png","position":"top-right","width":.12}
+{"cmd":"zoom","x":.25,"y":.25,"w":.5,"h":.5,"for":6}          {"cmd":"blur","x":0,"y":.9,"w":.4,"h":.1}
+{"cmd":"add","name":"captions","type":"captions"}  types: text shape image zoom blur captions model
+{"cmd":"add","name":"x","file":"/abs/path.py","params":{...}}  (your own processor file)
+{"cmd":"set","name":"x","params":{...}}  {"cmd":"enable","name":"x","for":5}  {"cmd":"disable","name":"x"}
+{"cmd":"remove","name":"x"}
+{"cmd":"rule","rule":{...}}  {"cmd":"unrule","id":"..."}
+{"cmd":"mark","type":"section|important|mistake|marker","note":"..."}
+{"cmd":"learn","name":"slide","labels":["yes","no"],"region":[x,y,w,h]?}  {"cmd":"label","name":"slide","value":"yes"}
+{"cmd":"wrong","name":"slide"}  {"cmd":"forget","name":"slide"}
+{"cmd":"stt","on":true,"language":"ar"}  {"cmd":"ocr","on":true,"interval":2}  {"cmd":"status"}  {"cmd":"stop"}""",
+
+"rules": """Rules = instant reflexes (the recorder applies them in ms, no need for you to watch):
+{"id":"pause_title","when":{"kind":"silence_end","where":{"duration":{">":2.5}}},
+ "do":[{"show_text":"{section}","for":3,"position":"top-left"}],"cooldown":20}
+where-ops: > >= < <= == != contains in startswith matches(regex). once:true fires one time.
+actions: show_text / zoom{} / shape{} / enable / disable / set+params / mark / notify_claude / label+value
+templates: {text} {command} {args} {label} {section} {duration} {t} + any data field of the event.
+Examples:
+- when screen_text contains "error" -> shape box around the screen + notify_claude "error on screen"
+- when learner slide == yes -> enable "slide_zoom"; when == no -> disable it
+- when loud -> mark important""",
+
+"processors": """Write a processor when commands/rules are not enough (live_processor(session, name, code)):
+from vidai.live.processors import LiveProcessor, register
+import numpy as np, cv2
+from vidai import native
+@register
+class Vignette(LiveProcessor):
+    defaults = {"strength": 0.5}
+    stage = 0                      # 0 = changes the picture (runs first), 1 = overlay on top (default)
+    listens = {"speech_start"}     # events delivered to on_event (optional)
+    def on_event(self, ev, ctx): ...
+    def process(self, frame, t, ctx):   # frame: HxWx3 uint8 RGB (1920x1080 by default); return a frame
+        ...
+Rules: budget ~8 ms per frame (set budget_ms if you need more); no Python loops over pixels — use NumPy,
+OpenCV (cv2) and vidai.native (alpha_blend, affine_color, frame_mad, rms_db). Cache anything expensive
+(ctx.overlay(op) caches rendered text/shape/image overlays). ctx.stats = latest value of every stat,
+ctx.bus.publish(kind, data) to emit your own stats (other rules can react to them).
+A processor that raises or is too slow is disabled automatically and you get an `error` event with the reason:
+read it, fix the code, call live_processor again (same name replaces it).""",
+
+"models": """Instant models (learned and corrected during the recording, k-NN on tiny frame features):
+1. {"cmd":"learn","name":"whiteboard","labels":["yes","no"],"region":null}
+2. Teach: {"cmd":"label","name":"whiteboard","value":"yes"} while the thing is visible, "no" when not
+   (the user can say "VidAI label yes/no"). Predictions start after both labels have examples.
+3. It publishes learner events (name,label,confidence) when its answer changes -> use them in rules.
+4. Correct instantly: {"cmd":"wrong","name":"whiteboard"} (or the user says "VidAI wrong"), or label again.
+5. At the end it is saved to the lab registry (reusable with classify_video on other videos).
+For heavier needs (a real detector, a transform) use the lab: train/train_until_suitable offline, then run it
+live with {"cmd":"add","type":"model","params":{"model":"<name>"}} or your own processor that loads it.""",
+}
+
+
+def guide(topic: str | None = None) -> str:
+    if topic and topic in GUIDE:
+        return GUIDE[topic]
+    return "\n\n".join(f"## {k}\n{v}" for k, v in GUIDE.items())

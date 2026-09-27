@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vidai": {
+      "command": "/home/samman/Documents/MyGitHub/VidAI/.venv/bin/python",
+      "args": ["-m", "vidai.mcp_server"]
+    }
+  }
+}
