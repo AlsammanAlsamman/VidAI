@@ -7,6 +7,10 @@
 <p align="center"><b>Record, understand and improve your videos — by talking to Claude.</b></p>
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/AlsammanAlsamman/VidAI/master/assets/banner.jpg" alt="A YouTuber records while VidAI robots run the camera, bring a new wig on request and paint a new background live" width="100%">
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/status-under%20development-ff3b5c" alt="status: under development">
   <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec" alt="PyPI vidai-rec"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-34d399" alt="python 3.10+">
