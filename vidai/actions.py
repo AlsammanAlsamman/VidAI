@@ -107,6 +107,28 @@ def download(url: str, name: str | None = None, folder: str = "downloads") -> di
     return {"path": str(target), "bytes": n}
 
 
+def download_model(model_id: str) -> dict:
+    """Install a catalog model (vidai.hub) into ~/.vidai/assets/hub."""
+    from . import hub
+
+    m = hub.CATALOG[model_id]
+    target = hub.path(model_id)
+    tmp = target.with_suffix(target.suffix + ".part")
+    n = 0
+    req = urllib.request.Request(m["url"], headers={"User-Agent": "vidai"})
+    with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as f:
+        while chunk := r.read(1 << 16):
+            n += len(chunk)
+            if n > MAX_DOWNLOAD:
+                f.close()
+                tmp.unlink(missing_ok=True)
+                raise ValueError("download too large")
+            f.write(chunk)
+    os.replace(tmp, target)
+    log("install_model", model=model_id, url=m["url"], path=str(target), bytes=n, license=m["license"])
+    return {"model": model_id, "path": str(target), "bytes": n, "license": m["license"]}
+
+
 def create_file(relpath: str, content: str, session: str | None = None) -> dict:
     base = Path(session) if session else workspace()
     target = _safe_target(relpath, base)
@@ -125,9 +147,15 @@ def describe(action: str, args: dict) -> str:
                f"{urllib.parse.urlparse(args['url']).netloc}"
     if action == "create_file":
         return f"create the file {args['relpath']}"
+    if action == "model":
+        from . import hub
+
+        m = hub.CATALOG[args["model"]]
+        return f"download the {m['title']} model ({m['mb']} MB, {m['license']})"
     return action
 
 
 RUN = {"install": lambda a: install(a["packages"]),
        "download": lambda a: download(a["url"], a.get("name"), a.get("folder", "downloads")),
-       "create_file": lambda a: create_file(a["relpath"], a["content"], a.get("session"))}
+       "create_file": lambda a: create_file(a["relpath"], a["content"], a.get("session")),
+       "model": lambda a: download_model(a["model"])}

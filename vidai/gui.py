@@ -355,7 +355,8 @@ class RecorderApp:
             for i, part in enumerate(parts):
                 d.text((24, y + 4 + 20 * i), part, font=self._f_small, fill=color)
         pending = (f"{self.session.live.address}, I need to {self.ask[1]}", WARN) if self.ask else (
-            (f"Claude asks: {self.question[1]}", ACCENT_2) if self.question else None)
+            ((self.question[1] if self.question[1].startswith("💡") else f"Claude asks: {self.question[1]}"),
+             ACCENT_2) if self.question else None)
         if pending:  # the question stays on the preview until answered (never recorded)
             parts = _wrap(d, pending[0], self._f_small, PREVIEW_W - 48)[:3]
             h = 12 + 20 * len(parts)

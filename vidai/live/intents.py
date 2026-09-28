@@ -51,10 +51,131 @@ def _find(chain, t: str):
     return hits
 
 
+COLORS = {"purple": [80, 50, 150], "blue": [30, 70, 170], "green": [30, 140, 70], "black": [10, 10, 12],
+          "white": [235, 235, 240], "red": [170, 30, 40], "pink": [230, 120, 170], "orange": [230, 120, 30],
+          "yellow": [230, 200, 50], "gray": [110, 110, 115], "grey": [110, 110, 115], "dark": [20, 18, 30]}
+
+
+def _adjust(chain, **delta) -> list[dict]:
+    """Change (or create) the one picture-adjustment effect. delta: param -> ("+", x) | ("=", x)."""
+    cur = chain.get("fx_adjust")
+    base = dict(cur.params) if cur is not None else {}
+    new = {}
+    for k, (op, v) in delta.items():
+        default = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "warmth": 0.0, "gamma": 1.0,
+                   "sharpen": 0.0}.get(k, 0.0)
+        new[k] = v if op == "=" else round(min(max(base.get(k, default) + v, -0.5 if k in ("brightness", "warmth")
+                                                   else 0.0), 2.5), 3)
+    if cur is None:
+        return [{"cmd": "add", "name": "fx_adjust", "type": "adjust", "params": new}]
+    return [{"cmd": "set", "name": "fx_adjust", "params": new}]
+
+
+def _images() -> dict[str, str]:
+    """Photos VidAI already has (downloaded earlier), by the words in their file names."""
+    import os
+    from pathlib import Path
+
+    d = Path(os.environ.get("VIDAI_HOME", Path.home() / ".vidai")) / "work" / "downloads"
+    out = {}
+    if d.exists():
+        for f in d.iterdir():
+            if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                for w in re.findall(r"[a-z]{3,}", f.stem.lower()):
+                    out.setdefault(w, str(f))
+    return out
+
+
+def _picture(t: str, chain) -> list[dict] | None:
+    """Light, contrast, colours, warmth, sharpness."""
+    if re.search(r"\b(fix|improve|better|auto|correct)\w* (the |my )?(light|lighting|exposure)\b|\btoo dark\b", t):
+        return _adjust(chain, auto=("=", True))
+    if re.search(r"\b(normal|original|reset|natural)\b (the )?(colou?rs?|light|picture|image|filters?)\b", t):
+        return [{"cmd": "remove", "name": "fx_adjust"}] if chain.get("fx_adjust") else None
+    if re.search(r"\bblack and white\b|\bgr[ae]yscale\b|\bno colou?rs?\b", t):
+        return _adjust(chain, saturation=("=", 0.0))
+    if re.search(r"\b(brighter|brighten|more light|lighten up|light up|increase (the )?(light|brightness))\b", t):
+        return _adjust(chain, brightness=("+", 0.07), gamma=("+", -0.1))
+    if re.search(r"\b(darker|less light|dim|decrease (the )?(light|brightness))\b", t):
+        return _adjust(chain, brightness=("+", -0.07), gamma=("+", 0.1))
+    if re.search(r"\bmore contrast\b|\bincrease (the )?contrast\b", t):
+        return _adjust(chain, contrast=("+", 0.15))
+    if re.search(r"\bless contrast\b|\bdecrease (the )?contrast\b|\bsofter\b", t):
+        return _adjust(chain, contrast=("+", -0.15))
+    if re.search(r"\b(more colou?rs?|more colou?rful|colou?rful|vivid|saturate|more saturation)\b", t):
+        return _adjust(chain, saturation=("+", 0.3))
+    if re.search(r"\b(less colou?rs?|less colou?rful|muted|desaturate|less saturation)\b", t):
+        return _adjust(chain, saturation=("+", -0.3))
+    if re.search(r"\bwarmer\b|\bmore warm\b", t):
+        return _adjust(chain, warmth=("+", 0.35))
+    if re.search(r"\b(cooler|colder|more cool|bluer)\b", t):
+        return _adjust(chain, warmth=("+", -0.35))
+    if re.search(r"\b(sharper|sharpen|more sharp|more detail)\b", t):
+        return _adjust(chain, sharpen=("+", 0.3))
+    return None
+
+
+def _background(t: str, chain) -> list[dict] | None:
+    """'blur the background', 'beach behind me', 'purple background', 'moving background', 'remove the background'."""
+    if not re.search(r"\bbackground\b|\bbehind me\b", t):
+        return None
+    params = None
+    if re.search(r"\bblur\w*\b", t):
+        params = {"mode": "blur"}
+    elif re.search(r"\b(moving|animated|animation|live)\b", t):
+        params = {"mode": "animated"}
+    else:
+        imgs = _images()
+        hit = next((w for w in re.findall(r"[a-z]{3,}", t) if w in imgs and w not in ("background", "behind")), None)
+        if hit:
+            params = {"mode": "image", "image": imgs[hit]}
+        else:
+            col = next((c for c in COLORS if re.search(rf"\b{c}\b", t)), None)
+            if col:
+                params = {"mode": "color", "color": COLORS[col]}
+            elif re.search(r"\b(remove|delete|hide|clear|replace|change)\b", t):
+                if chain.get("fx_background") is not None and re.search(r"\b(remove|delete|clear)\b", t):
+                    return [{"cmd": "remove", "name": "fx_background"}]  # it's on: take it off
+                params = {"mode": "blur"}
+    if params is None:
+        return None  # e.g. "a forest behind me" with no forest photo yet -> Claude finds one
+    if chain.get("fx_background") is not None:
+        return [{"cmd": "set", "name": "fx_background", "params": params}]
+    return [{"cmd": "add", "name": "fx_background", "type": "background", "params": params}]
+
+
+def _hub(t: str, chain) -> list[dict] | None:
+    """Requests a hub model can do: emotion, gestures, anime/cartoon look, painting styles."""
+    if re.search(r"\b(remove|stop|no|without|normal)\b", t):
+        return None  # "remove the style" etc. is handled by the remove rule
+    if re.search(r"\b(emotions?|mood|feelings?|expressions?)\b", t):
+        return [{"cmd": "model", "model": "emotion"}]
+    if re.search(r"\b(gestures?|thumbs? up|hand signs?|signs with my hand)\b", t):
+        return [{"cmd": "model", "model": "gestures"}]
+    if "eye" not in t and re.search(r"\b(anime|ghibli|manga|cartoon (me|style|look|version))\b|\bme (a )?cartoon\b", t):
+        return [{"cmd": "model", "model": "anime"}]
+    styles = {"mosaic": "style_mosaic", "candy": "style_candy", "udnie": "style_udnie", "cubist": "style_udnie",
+              "rain": "style_rain_princess", "impressionist": "style_rain_princess", "pointil": "style_pointilism",
+              "dots": "style_pointilism"}
+    for w, mid in styles.items():
+        if re.search(rf"\b{w}", t) and re.search(r"\b(style|look|painting|filter|effect|like)\b", t):
+            return [{"cmd": "model", "model": mid}]
+    if re.search(r"\b(painting|painted|artistic|work of art)\b", t):
+        return [{"cmd": "model", "model": "style_mosaic"}]
+    return None
+
+
 def match(text: str, chain) -> list[dict] | None:
     t = " " + re.sub(r"[^\w\s']", " ", text.lower()).strip() + " "
     t = re.sub(r"\s+", " ", t)
     fx = _fx(chain)
+
+    if re.search(r"\b(back to normal|reset everything|clear everything|normal video|no effects|remove all( the)? effects)\b", t):
+        return [{"cmd": "remove", "name": p.name} for p in fx] or None
+    for special in (_background, _picture, _hub):  # checked first: "remove the background" means apply it
+        out = special(t, chain)
+        if out:
+            return out
 
     # remove
     if re.search(r"\b(remove[ds]?|removing|delete[ds]?|deleting|take off|take away|get rid of|hide|clear|"

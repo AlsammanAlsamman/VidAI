@@ -471,6 +471,30 @@ def live_say(session: str, text: str, subtitle: bool = False, done: bool = True)
     return live_control(session, [{"cmd": "say", "text": text, "subtitle": subtitle}], done=done)
 
 
+# ---------- model hub: small open models instead of writing code ----------
+def model_search(query: str, online: bool = False) -> dict:
+    """Which small open model can do this? Returns verified catalog models (with adapters, instant to apply)
+    and, with online=True, Hugging Face ONNX candidates (you would wrap one with a live_processor adapter).
+    Prefer a catalog model over writing code."""
+    from . import hub
+
+    return hub.search(query, online=online)
+
+
+def model_apply(session: str, model_id: str, params: dict | None = None, done: bool = True) -> dict:
+    """Use a catalog model live (e.g. 'emotion', 'gestures', 'anime', 'style_mosaic'). If it is not installed,
+    VidAI asks the user ("Master, I need to download …") — or installs directly in full-access mode — and
+    switches it on when ready. Models: see model_search."""
+    return live_control(session, [{"cmd": "model", "model": model_id, "params": params or {}}], done=done)
+
+
+def color_from_photo(session: str, image: str, strength: float = 0.8, done: bool = True) -> dict:
+    """Make the video's colours look like a reference photo (a tiny model trained in milliseconds from the
+    photo's colour statistics). Get the photo first with vidai_download if needed."""
+    return live_control(session, [{"cmd": "add", "name": "fx_grade", "type": "grade",
+                                   "params": {"image": image, "strength": strength}}], done=done)
+
+
 def live_status(session: str) -> dict:
     """Processors, rules, learners and performance of the running recorder."""
     r = live_control(session, [{"cmd": "status"}], done=False)

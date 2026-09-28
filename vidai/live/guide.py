@@ -36,6 +36,10 @@ captions on/off | learn <name> | label <value> | wrong | stop | anything else ->
    attach to: hand right_hand left_hand other_hand finger head above_head face eyes nose mouth screen
    what: any emoji, a word ("apple","horns","sunglasses"...), or an image path
 {"cmd":"add","name":"fx_big_eyes","type":"big_eyes","params":{"zoom":1.8}}
+{"cmd":"add","name":"fx_adjust","type":"adjust","params":{"auto":true,"brightness":0.1,"contrast":1.1,"saturation":1.2,
+   "warmth":0.3,"gamma":0.9,"sharpen":0.3}}   picture: light/contrast/colours/warmth/sharpness (one C pass)
+{"cmd":"add","name":"fx_background","type":"background","params":{"mode":"blur|color|image|animated","image":"/path.jpg"}}
+   (the user can say these themselves: "fix the light", "brighter", "blur the background", "beach behind me"...)
 {"cmd":"add","name":"x","file":"/abs/path.py","params":{...}}  (your own processor file)
 {"cmd":"set","name":"x","params":{...}}  {"cmd":"enable","name":"x","for":5}  {"cmd":"disable","name":"x"}
 {"cmd":"remove","name":"x"}
@@ -93,6 +97,14 @@ vidai_create_file(relpath, content, session, reason).
 - full mode: the user said "VidAI, take all actions" -> runs at once ("VidAI, ask me first" switches back).
 Installs go only into VidAI's own Python; files only under ~/.vidai or the session; all logged in
 ~/.vidai/actions.log.""",
+
+"hub": """Small open models with ready adapters (vidai.hub) — use them before writing code:
+model_search("show my mood") -> catalog ids; model_apply(session, "emotion"|"gestures"|"anime"|"style_mosaic"|
+"style_candy"|"style_udnie"|"style_rain_princess"|"style_pointilism", params) = {"cmd":"model","model":...}
+(asks permission to download unless full access). Live events: emotion {label,confidence}, gesture {name,emoji}
+-> rules: {"when":{"kind":"gesture","where":{"name":"Victory"}},"do":[{"sticker":"✌","for":2}]}
+Colours like a photo: color_from_photo(session, "/path.jpg") (type "grade", trained in ms).
+Styles/anime are slow live (a few paintings per second); they look best applied when editing.""",
 
 "models": """Instant models (learned and corrected during the recording, k-NN on tiny frame features):
 1. {"cmd":"learn","name":"whiteboard","labels":["yes","no"],"region":null}

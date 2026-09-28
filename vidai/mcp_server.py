@@ -20,6 +20,7 @@ TOOLS = [
     service.vidai_install, service.vidai_download, service.vidai_create_file, service.vidai_permissions,
     service.vidai_profile, service.vidai_learn, service.vidai_forget,
     service.live_notify, service.live_ask_user, service.live_say,
+    service.model_search, service.model_apply, service.color_from_photo,
     service.studio_sessions,
     service.record_start, service.record_mark, service.record_stop,
     service.analyze_video, service.anchors, service.add_anchor_events,

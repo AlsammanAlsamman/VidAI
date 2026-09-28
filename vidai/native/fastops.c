@@ -112,3 +112,16 @@ void mask_blend(uint8_t *dst, const uint8_t *src, const uint8_t *mask, int64_t n
         d[2] = (uint8_t)(((d[2] * a + s[2] * b + 128) * 257) >> 16);
     }
 }
+
+/* General colour transform from per-channel tables: out_c = clamp(sum_ch T[c][ch][in_ch]).
+ * T (3 x 3 x 256 floats, 0..255 scale) can encode gamma, exposure, contrast, saturation, warmth… in ONE pass.
+ * `in` and `out` may be the same buffer (in place). */
+void lut3x3(const uint8_t *in, uint8_t *out, int64_t npix, const float *T) {
+    #pragma omp parallel for schedule(static) if (npix > 200000)
+    for (int64_t p = 0; p < npix; p++) {
+        const uint8_t r = in[p * 3], g = in[p * 3 + 1], b = in[p * 3 + 2];
+        out[p * 3]     = clamp8(T[0 * 768 + r] + T[0 * 768 + 256 + g] + T[0 * 768 + 512 + b]);
+        out[p * 3 + 1] = clamp8(T[1 * 768 + r] + T[1 * 768 + 256 + g] + T[1 * 768 + 512 + b]);
+        out[p * 3 + 2] = clamp8(T[2 * 768 + r] + T[2 * 768 + 256 + g] + T[2 * 768 + 512 + b]);
+    }
+}

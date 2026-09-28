@@ -122,6 +122,7 @@ class LivePipeline:
         self.voice = Voice(Path(session_dir) / "voice" if session_dir else None)
         self.voice_clips: list[tuple[float, str, float]] = []  # (start on the recording clock, wav, seconds)
         self._talk = False  # "VidAI talk": the next thing the user says is a question for Claude
+        self.suggesting: dict | None = None  # "VidAI suggest": {"items", "i", "qid"}
         # undo / redo: each request is a group of reversible steps
         self._txn = 0
         self.history: list[dict] = []  # {"txn", "undo": [cmds], "redo": [cmds]}
@@ -417,9 +418,20 @@ class LivePipeline:
             self.command({"cmd": "remove", "name": "captions"}, source="voice")
         elif cmd == "stop":
             self.command({"cmd": "stop"}, source="voice")
+        elif cmd in ("confirm", "deny", "next") and self.questions and not self.suggesting and not self.asks:
+            # a question from Claude is open: "something else" / "no" / "yes" are answers to it
+            self.command({"cmd": "answer", "text": d.get("text", "")}, source="voice")
         elif cmd in ("confirm", "deny"):
             if self.asks:
                 self.command({"cmd": cmd}, source="voice")
+            elif self.suggesting:
+                self.command({"cmd": "answer", "question": self.suggesting["qid"],
+                              "text": "Confirm" if cmd == "confirm" else "Cancel"}, source="voice")
+        elif cmd == "next":
+            if self.suggesting:
+                self.command({"cmd": "answer", "question": self.suggesting["qid"], "text": "Next"}, source="voice")
+        elif cmd == "suggest":
+            self.command({"cmd": "suggest"}, source="voice")
         elif cmd == "full_access":
             self.command({"cmd": "mode", "mode": "full"}, source="voice")
         elif cmd == "ask_first":
@@ -480,15 +492,17 @@ class LivePipeline:
             self.history.append({"txn": self._txn, "undo": list(inverse), "redo": [forward]})
         del self.history[:-50]
 
-    def undo(self) -> dict:
+    def undo(self, quiet: bool = False) -> dict:
         if not self.history:
-            self.notify("Nothing to undo")
+            if not quiet:
+                self.notify("Nothing to undo")
             return {"undone": 0}
         step = self.history.pop()
         for c in step["undo"]:
             self.command(dict(c), source="undo")
         self.redo_stack.append(step)
-        self.notify("↶ Undone")
+        if not quiet:
+            self.notify("↶ Undone")
         return {"undone": len(step["redo"])}
 
     def redo(self) -> dict:
@@ -517,6 +531,9 @@ class LivePipeline:
                  "zoom in / out · captions on / off · undo · redo · lighter",
                  "add <thing> in my hand / on my head / on my eyes  (apple, crown, sunglasses …)",
                  "make my eyes pop · text above my head saying … · remove <thing> / everything",
+                 "fix the light · brighter / darker · more contrast · more colourful · black and white · warmer / cooler",
+                 "blur the background · beach behind me · purple background · moving background · normal colours",
+                 "suggest → ideas previewed live: confirm · next · cancel",
                  "take all actions · ask me first · confirm / deny",
                  "anything else → Claude (the eye icon shows while Claude works)"]
         macros = [m["phrase"] for m in prof.macros()][-6:]
@@ -755,6 +772,11 @@ class LivePipeline:
             self.command({"cmd": "set", "name": a["set"], "params": a.get("params", {})}, source=f"rule:{rule['id']}")
         elif "mark" in a:
             self.command({"cmd": "mark", "type": a["mark"], "note": a.get("note", "")}, source=f"rule:{rule['id']}")
+        elif "sticker" in a:  # e.g. a gesture rule: {"sticker": "👍", "to": "hand", "for": 2}
+            self.command({"cmd": "add", "name": self._temp_name("sticker"), "type": "attach",
+                          "params": {"what": a["sticker"], "to": a.get("to", "screen"),
+                                     "position": a.get("position", "top-right")}, "for": a.get("for", 2)},
+                         source=f"rule:{rule['id']}")
         elif "notify_claude" in a:
             self.bus.publish("claude", {"message": a["notify_claude"], "source": f"rule:{rule['id']}"})
         elif "label" in a:
@@ -928,6 +950,25 @@ class LivePipeline:
                     self.asks.pop(rid)
                     self.bus.publish("permission", {"request": rid, "state": "approved", "by": "full_access"})
             return {"mode": mode}
+        if cmd == "model":  # use a hub model: install it (with permission) in the background, then apply it
+            from .. import hub
+
+            mid = str(c.get("model") or c.get("model_id"))
+            if mid not in hub.CATALOG:
+                raise KeyError(f"unknown hub model {mid!r}; see vidai.hub.CATALOG / model_search")
+            threading.Thread(target=self._install_and_apply, args=(mid, dict(c.get("params") or {})),
+                             daemon=True).start()
+            return {"model": mid, "state": "applying" if hub.installed(mid) else "installing"}
+        if cmd == "suggest":  # VidAI proposes ideas one by one, previewed live: Confirm / Next / Cancel
+            if self.suggesting:
+                self._suggest_end(undo=True, note=False)
+            items = self._suggestions()
+            if not items:
+                self.notify("No new ideas right now", "info")
+                return {"suggestions": 0}
+            self.suggesting = {"items": items, "i": -1, "qid": ""}
+            self._suggest_show(0)
+            return {"suggestions": len(items)}
         if cmd == "talk":  # "VidAI talk": VidAI asks, the next sentence is a question for Claude
             self._talk = True
             self.say("How can I help you?")
@@ -978,6 +1019,8 @@ class LivePipeline:
             return {"question": qid}
         if cmd == "cancel_question":
             qid = str(c.get("question") or "")
+            if self.suggesting and qid == self.suggesting["qid"]:  # nobody answered: take the preview back
+                self._suggest_end(undo=True, note=False)
             q = self.questions.pop(qid, None) if qid else None
             if q is None and not qid and self.questions:
                 self.questions.clear()
@@ -994,7 +1037,10 @@ class LivePipeline:
                 return {"state": "unknown question"}
             ans = _match_option(c.get("text", ""), q["options"])
             self.bus.publish("answer", {"question": qid, "answer": ans, "said": c.get("text", ""), "by": c.get("by", "user")})
-            self.notify(f"✓ {ans}", "ok")
+            if self.suggesting and qid == self.suggesting["qid"]:
+                self._suggest_answer(ans)
+            else:
+                self.notify(f"✓ {ans}", "ok")
             return {"question": qid, "answer": ans}
         if cmd == "remove_last_added":
             fx = [p for p in self.chain.items if not p.name.startswith("_")]
@@ -1047,6 +1093,162 @@ class LivePipeline:
             "errors": sum(1 for e in self.bus.history if e["kind"] == "error"),
             "learned": self.learned,
         })
+
+    # ------------------------------------------------------------------ "VidAI suggest"
+    SUGGESTIONS = [  # (title shown/spoken, phrase the fast path understands, needs)
+        ("Fix the light", "fix the light", None),
+        ("Blur the background", "blur the background", None),
+        ("A beach behind you", "beach behind me", "image:beach"),
+        ("A moving background", "moving background", None),
+        ("More colourful picture", "more colourful", None),
+        ("Warmer colours", "warmer", None),
+        ("Show your emotion above your head", "show my emotion", "model:emotion"),
+        ("React to your hand gestures", "detect my gestures", "model:gestures"),
+        ("A crown on your head", "put a crown on my head", None),
+        ("Sunglasses", "put sunglasses on me", None),
+        ("Pop-out cartoon eyes", "make my eyes pop", None),
+        ("A painting look", "make it look like a painting", "model:style_mosaic"),
+        ("Black and white", "black and white", None),
+        ("A little sparkle on your hand", "put sparkles in my hand", None),
+    ]
+
+    def _suggestions(self) -> list[dict]:
+        """Ideas that fit now: nothing already on, instant to preview (installed models only), dark picture ->
+        light first, and what the user confirmed before ranks higher (skipped often -> dropped)."""
+        from .. import hub
+        from .intents import _images, match
+
+        prefs = self.profile.pref("suggestions", {}) or {}
+        imgs = None
+        out = []
+        for title, phrase, needs in self.SUGGESTIONS:
+            if needs and needs.startswith("model:") and not hub.installed(needs[6:]):
+                continue
+            if needs and needs.startswith("image:"):
+                imgs = imgs if imgs is not None else _images()
+                if needs[6:] not in imgs:
+                    continue
+            cmds = match(phrase, self.chain)
+            if not cmds or all(c.get("cmd") == "remove" for c in cmds):
+                continue
+            if any(c.get("cmd") == "add" and self.chain.get(c.get("name", "")) is not None for c in cmds):
+                continue  # already on
+
+            def no_change(c: dict) -> bool:
+                q = self.chain.get(c.get("name", "")) if c.get("cmd") == "set" else None
+                return q is not None and all(q.params.get(k) == v for k, v in (c.get("params") or {}).items())
+
+            if all(no_change(c) for c in cmds):
+                continue  # it would change nothing (e.g. auto light is already on)
+            st = prefs.get(title, {"yes": 0, "no": 0})
+            if st["no"] >= 3 and st["yes"] == 0:
+                continue  # the user keeps skipping it
+            score = 2 * st["yes"] - st["no"]
+            if title == "Fix the light" and self._is_dark():
+                score += 10
+            out.append({"title": title, "phrase": phrase, "cmds": cmds, "score": score})
+        out.sort(key=lambda d: -d["score"])  # stable: equal scores keep the list order
+        return out[:10]
+
+    def _is_dark(self) -> bool:
+        f = self.preview_frame
+        return f is not None and float(f.mean()) < 90
+
+    def _suggest_show(self, i: int) -> None:
+        import uuid
+
+        st = self.suggesting
+        if st is None:
+            return
+        if i >= len(st["items"]):
+            self._suggest_end(undo=False, note=False)
+            self.notify("That's all my ideas for now 💡", "info", 4)
+            return
+        st["i"] = i
+        item = st["items"][i]
+        self._txn += 1  # the preview is one undo step
+        self.redo_stack.clear()
+        for c in item["cmds"]:
+            self.command(dict(c), source="suggest")
+        qid = "sugg_" + uuid.uuid4().hex[:6]
+        st["qid"] = qid
+        self.command({"cmd": "question", "id_q": qid, "speak": False, "options": ["Confirm", "Next", "Cancel"],
+                      "text": f"💡 {item['title']}  ({i + 1}/{len(st['items'])})"}, source="suggest")
+        self.say(f"{item['title']}?")
+        if self.stt:  # "next" / "confirm" / "cancel" without the wake word
+            self.stt.armed_until = max(self._audio_now(), self.speaking_until) + 15
+
+    def _suggest_answer(self, ans: str) -> None:
+        st = self.suggesting
+        if st is None:
+            return
+        item = st["items"][st["i"]]
+        prefs = self.profile.pref("suggestions", {}) or {}
+        rec = prefs.setdefault(item["title"], {"yes": 0, "no": 0})
+        a = (ans or "").lower()
+        if a.startswith("confirm"):
+            rec["yes"] += 1
+            self.profile.set_pref("suggestions", prefs)
+            self._suggest_end(undo=False, note=False)
+            self.notify(f"✓ Kept: {item['title']} — say “VidAI suggest” for more ideas", "ok", 5)
+        elif a.startswith("next"):
+            rec["no"] += 1
+            self.profile.set_pref("suggestions", prefs)
+            self.undo(quiet=True)
+            self._suggest_show(st["i"] + 1)
+        else:  # cancel (or anything else)
+            self._suggest_end(undo=True, note=True)
+
+    def _suggest_end(self, undo: bool, note: bool) -> None:
+        st, self.suggesting = self.suggesting, None
+        if st and st.get("qid"):
+            self.questions.pop(st["qid"], None)
+            self.bus.publish("answer", {"question": st["qid"], "answer": None, "cancelled": True})
+        if undo and st and st["i"] >= 0:
+            self.undo(quiet=True)
+        if note:
+            self.notify("Suggestions cancelled", "info", 3)
+
+    def _install_and_apply(self, mid: str, params: dict) -> None:
+        import uuid
+
+        from .. import actions, hub
+
+        m = hub.CATALOG[mid]
+        if not hub.installed(mid):
+            if actions.get_mode(self.dir) != "full":
+                rid = uuid.uuid4().hex[:8]
+                got = threading.Event()
+                answer: dict = {}
+
+                def on_perm(ev: dict) -> None:
+                    if ev["data"].get("request") == rid:
+                        answer.update(ev["data"])
+                        got.set()
+
+                self.bus.subscribe(on_perm, {"permission"})
+                self.command({"cmd": "ask", "id_ask": rid, "text": actions.describe("model", {"model": mid})},
+                             source="hub")
+                if not got.wait(90) or answer.get("state") != "approved":
+                    self.notify(f"Not installing {m['title']}", "warn")
+                    return
+            self.notify(f"Downloading {m['title']} ({m['mb']} MB)…", "info", 8)
+            try:
+                actions.download_model(mid)
+            except Exception as e:
+                self.bus.publish("error", {"where": "hub", "model": mid, "error": repr(e)[:200]})
+                self.notify(f"Could not download {m['title']}", "warn")
+                return
+            if self.dir:
+                with open(Path(self.dir) / "CREDITS.txt", "a", encoding="utf-8") as f:
+                    f.write(f"Model: {m['title']} — {m['url']} ({m['license']})\n")
+        adapter = m["adapter"]
+        name = "fx_style" if adapter == "style" else f"fx_{mid}"
+        prm = {**({"model": mid} if adapter == "style" else {}), **params}
+        self.command({"cmd": "add", "name": name, "type": adapter, "params": prm}, source="hub")
+        slow = "" if m["live"] else " (paints a few times per second live; full quality when editing)"
+        self.notify(f"✓ {m['title']}{slow}", "ok", 5)
+        self.bus.publish("action", {"what": "model_applied", "model": mid, "name": name})
 
     def say(self, text: str, record: bool = True) -> None:
         """VidAI speaks: offline voice (Piper) on the speakers, and — while recording — the same clip is mixed

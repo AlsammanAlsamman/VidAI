@@ -27,6 +27,7 @@ Rules:
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -538,3 +539,89 @@ class BigEyes(LiveProcessor):
             roi = frame[y0:y1, x0:x1].astype(np.float32)
             frame[y0:y1, x0:x1] = (big * m + roi * (1 - m)).astype(np.uint8)
         return frame
+
+
+_LUM = np.array([0.299, 0.587, 0.114], np.float32)
+
+
+@register
+class Adjust(LiveProcessor):
+    """Picture adjustments, fast (one C colour pass + one gamma look-up table):
+    brightness (-0.4..0.4, adds light), exposure (gain, 0.5..2), contrast (0.5..2), saturation (0 = black and white,
+    1 = normal, 2 = vivid), warmth (-1 cool .. 1 warm), gamma (<1 lifts shadows), sharpen (0..1),
+    auto (true = keep the picture well lit automatically, e.g. in a dark room)."""
+    type_name = "adjust"
+    stage = 0
+    budget_ms = 12.0
+    defaults = {"brightness": 0.0, "exposure": 1.0, "contrast": 1.0, "saturation": 1.0, "warmth": 0.0,
+                "gamma": 1.0, "sharpen": 0.0, "auto": False, "target": 0.5}
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._auto_gamma = 1.0
+        self._auto_gain = 1.0
+        self._n = 0
+        self._lut_key = None
+        self._lut = None
+
+    def matrix(self) -> np.ndarray:
+        """4x3 matrix (rows r, g, b, 1 -> columns r, g, b) in 0..1 colour space."""
+        p = self.params
+        s, c = float(p["saturation"]), float(p["contrast"])
+        gain = float(p["exposure"]) * (self._auto_gain if p["auto"] else 1.0)
+        M = s * np.eye(3, dtype=np.float32) + (1 - s) * np.outer(_LUM, np.ones(3, np.float32))
+        bias = np.zeros(3, np.float32)
+        M, bias = M * c, bias * c + 0.5 * (1 - c)  # contrast around mid grey
+        M, bias = M * gain, bias * gain
+        w = float(p["warmth"])
+        tint = np.array([1 + 0.12 * w, 1 + 0.02 * w, 1 - 0.12 * w], np.float32)
+        M, bias = M * tint[None, :], bias * tint
+        bias = bias + float(p["brightness"])
+        return np.vstack([M, bias[None, :]]).astype(np.float32)
+
+    def _measure(self, frame) -> None:
+        """Auto light: look at the middle of the picture (where the person usually is) every 10 frames."""
+        H, W = frame.shape[:2]
+        mid = frame[H // 5:H * 4 // 5:8, W // 4:W * 3 // 4:8].astype(np.float32) / 255.0
+        lum = float(np.mean(mid @ _LUM))
+        lum = min(max(lum, 0.02), 0.98)
+        target = float(self.params["target"])
+        g = math.log(target) / math.log(lum)  # gamma that maps the current level to the target
+        g = min(max(g, 0.45), 1.4)
+        gain = min(max(target / max(lum ** g, 1e-3), 0.8), 1.3)
+        self._auto_gamma += (g - self._auto_gamma) * 0.15  # smooth: no flicker
+        self._auto_gain += (gain - self._auto_gain) * 0.1
+
+    def tables(self) -> np.ndarray:
+        """(3, 3, 256) tables: gamma on each input channel, then the colour matrix -> one C pass."""
+        gamma = float(self.params["gamma"]) * (self._auto_gamma if self.params["auto"] else 1.0)
+        v = (np.arange(256, dtype=np.float32) / 255.0) ** gamma  # gamma per input value
+        M = self.matrix()  # rows: inputs r, g, b, 1 ; columns: outputs
+        T = np.empty((3, 3, 256), np.float32)
+        for c in range(3):
+            for ch in range(3):
+                T[c, ch] = v * M[ch, c] * 255.0
+            T[c, 0] += M[3, c] * 255.0  # bias once per output channel
+        return T
+
+    def process(self, frame, t, ctx):
+        import cv2
+
+        p = self.params
+        if p["auto"] and self._n % 10 == 0:
+            self._measure(frame)
+        self._n += 1
+        key = (tuple(sorted((k, v) for k, v in p.items() if k != "sharpen")), round(self._auto_gamma, 3),
+               round(self._auto_gain, 3))
+        if key != self._lut_key:  # rebuild the tables only when something changed
+            self._lut, self._lut_key = self.tables(), key
+        frame = native.lut3x3(np.ascontiguousarray(frame), self._lut)  # one C pass, in place
+        if float(p["sharpen"]) > 0.01:
+            small = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2), interpolation=cv2.INTER_AREA)
+            blur = cv2.resize(cv2.GaussianBlur(small, (0, 0), 0.9), (frame.shape[1], frame.shape[0]))
+            frame = cv2.addWeighted(frame, 1 + float(p["sharpen"]), blur, -float(p["sharpen"]), 0)
+        return frame
+
+
+from . import background as _background  # noqa: E402,F401  (registers the built-in "background" effect)
+from . import hub_effects as _hub_effects  # noqa: E402,F401  (emotion, gestures, style, grade)

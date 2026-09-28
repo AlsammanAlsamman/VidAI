@@ -55,6 +55,8 @@ def _build() -> ctypes.CDLL | None:
 
 def _load() -> None:
     global _lib, AVAILABLE
+    # OpenMP: more threads than half the cores only fight each other (and the recorder, trackers, models)
+    os.environ.setdefault("OMP_NUM_THREADS", str(max(1, min(4, (os.cpu_count() or 2) // 2))))
     _lib = _build()
     if _lib is None:
         return
@@ -67,6 +69,7 @@ def _load() -> None:
     _lib.frame_mad.argtypes = [P(np.uint8, flags="C"), i64, i64, P(np.float32, flags="C")]
     _lib.affine_color.argtypes = [P(np.uint8, flags="C"), P(np.uint8, flags="C"), i64,
                                   P(np.float32, flags="C"), i32, f32]
+    _lib.lut3x3.argtypes = [P(np.uint8, flags="C"), P(np.uint8, flags="C"), i64, P(np.float32, flags="C")]
     _lib.mask_blend.argtypes = [P(np.uint8, flags="C"), P(np.uint8, flags="C"), P(np.uint8, flags="C"), i64]
     _lib.alpha_blend.argtypes = [P(np.uint8, flags="C"), i32, i32, P(np.uint8, flags="C"), i32, i32, i32, i32, f32]
     AVAILABLE = True
@@ -152,4 +155,18 @@ def mask_blend(frame: np.ndarray, background: np.ndarray, mask: np.ndarray) -> n
         return frame
     a = mask[..., None].astype(np.float32) / 255.0
     frame[:] = (frame * a + background * (1 - a) + 0.5).astype(np.uint8)
+    return frame
+
+
+def lut3x3(frame: np.ndarray, T: np.ndarray) -> np.ndarray:
+    """out_c = clamp(sum_ch T[c, ch, in_ch]) for an RGB uint8 frame, IN PLACE. T: (3, 3, 256) float32, 0..255 scale."""
+    T = np.ascontiguousarray(T, np.float32)
+    if AVAILABLE and frame.flags.c_contiguous:
+        buf = frame.reshape(-1)
+        _lib.lut3x3(buf, buf, frame.shape[0] * frame.shape[1], T.reshape(-1))
+        return frame
+    f = frame.reshape(-1, 3)
+    out = T[0, 0][f[:, 0]] * 0  # NumPy fallback
+    res = np.stack([T[c, 0][f[:, 0]] + T[c, 1][f[:, 1]] + T[c, 2][f[:, 2]] for c in range(3)], axis=1)
+    frame[:] = np.clip(res + 0.5, 0, 255).astype(np.uint8).reshape(frame.shape)
     return frame

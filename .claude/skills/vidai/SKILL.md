@@ -53,6 +53,13 @@ Show the user a 3–5 line summary of the config (what you will track and why).
   Loop: `live_wait_request(session, since=next)` → it returns the request text → answer with ONE call → wait again.
   - VidAI already handles common requests itself (`handled_by_vidai`): stickers on hands/head/eyes/face,
     pop-out eyes, remove, bigger/smaller, swap hands. Don't redo those.
+  - Before writing any code for a visual idea, check `model_search(request)`: small open models with ready
+    adapters (emotion, hand gestures, anime look, painting styles…) → `model_apply(session, id)` (VidAI asks
+    permission to download, or installs directly in full access). Colours "like this photo" →
+    `color_from_photo(session, path)`. Nothing fits? `model_search(..., online=True)` lists Hugging Face ONNX
+    models; wrap one in a small `live_processor` adapter (run it in a worker thread) and `save_as` it.
+    Gestures/emotion publish live events: add rules like
+    {"when":{"kind":"gesture","where":{"name":"Thumb_Up"}},"do":[{"sticker":"👍","for":2}]}.
   - Prefer, in this order: `live_control` with built-ins (`attach` any emoji/word to hand | right_hand |
     left_hand | finger | head | above_head | face | eyes | nose | mouth | screen; `big_eyes`, `text`, `zoom`,
     `blur`, `shape`, `captions`) → `live_effect(session, name)` from the saved library (`live_effects()`) →
@@ -67,6 +74,8 @@ Show the user a 3–5 line summary of the config (what you will track and why).
     asks by voice; it returns the answer ("VidAI, the second one", a click, or typed text all work).
   - After you do something, tell them in one line in the window (never recorded):
     `live_notify(session, "Hair made bigger — say 'VidAI undo' to take it back")`.
+  - "VidAI suggest" previews ideas one by one (confirm / next / cancel) — VidAI does it alone; to add a new idea
+    to the list, extend LivePipeline.SUGGESTIONS with a phrase the fast path understands.
   - The user can say "VidAI undo / redo" (a whole request is one step), "VidAI help" (command card),
     "VidAI lighter" (performance), type in the "Tell VidAI…" box, or hold ctrl+alt+space to talk without the
     wake word. Requests from typing arrive exactly like voice ones.

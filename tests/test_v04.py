@@ -3,6 +3,7 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from vidai.capture import CaptureConfig
@@ -461,3 +462,128 @@ def test_self_hearing_guard_uses_the_audio_clock(tmp_path):
     pl.stt = None
     pl.stop()
     assert got == [] and armed > 50  # listening window is on the audio clock too
+
+
+# ---------------- picture adjustments + built-in background (instant, no Claude) ----------------
+def test_adjust_effect_changes_the_picture_fast():
+    from vidai.live.bus import LiveBus
+    from vidai.live.processors import REGISTRY, Context
+
+    ctx = Context(LiveBus(), 640, 360)
+    dark = np.full((360, 640, 3), 40, np.uint8)
+    dark[..., 0] = 60  # a dark, slightly red picture
+    bright = REGISTRY["adjust"]("a", {"brightness": 0.1, "gamma": 0.8}).process(dark.copy(), 0, ctx)
+    assert bright.mean() > dark.mean() + 20
+    grey = REGISTRY["adjust"]("g", {"saturation": 0.0}).process(dark.copy(), 0, ctx)
+    assert np.abs(grey[..., 0].astype(int) - grey[..., 2]).max() <= 1
+    warm = REGISTRY["adjust"]("w", {"warmth": 0.8}).process(np.full((36, 64, 3), 128, np.uint8), 0, ctx)
+    assert warm[..., 0].mean() > warm[..., 2].mean() + 10
+    auto = REGISTRY["adjust"]("auto", {"auto": True})
+    out = dark.copy()
+    for _ in range(60):
+        out = auto.process(dark.copy(), 0, ctx)
+    assert out.mean() > 75  # auto light lifted the dark picture (46 -> ~86), gently, toward mid grey
+
+
+def test_lut3x3_matches_numpy():
+    from vidai import native
+
+    rng = np.random.default_rng(3)
+    f = rng.integers(0, 256, (40, 60, 3)).astype(np.uint8)
+    T = rng.random((3, 3, 256)).astype(np.float32) * 90
+    c = native.lut3x3(f.copy(), T)
+    exp = np.clip(np.stack([T[k, 0][f[..., 0]] + T[k, 1][f[..., 1]] + T[k, 2][f[..., 2]] for k in range(3)], -1)
+                  + 0.5, 0, 255).astype(np.uint8)
+    assert np.abs(c.astype(int) - exp).max() <= 1
+
+
+def test_fast_path_picture_and_background_phrases(tmp_path, monkeypatch):
+    from vidai.live import intents
+    from vidai.live.bus import LiveBus
+    from vidai.live.processors import REGISTRY, Context, ProcessorChain
+
+    monkeypatch.setattr(intents, "_images", lambda: {"beach": "/x/beach.jpg"})
+    ch = ProcessorChain(Context(LiveBus(), 640, 360))
+    ch.ctx.need_tracking = lambda: None
+
+    def run(text):
+        cmds = intents.match(text, ch)
+        for c in cmds or []:
+            c = dict(c)
+            k = c.pop("cmd")
+            if k == "add":
+                ch.add(REGISTRY[c["type"]](c["name"], c.get("params", {})))
+            elif k == "set":
+                ch.get(c["name"]).configure(c["params"])
+            elif k == "remove":
+                ch.remove(c["name"])
+        return cmds
+
+    assert run("fix the light")[0]["params"] == {"auto": True}
+    run("brighter")
+    run("brighter")
+    assert ch.get("fx_adjust").params["brightness"] == pytest.approx(0.14)
+    assert run("black and white")[0]["params"] == {"saturation": 0.0}
+    assert run("normal colors") == [{"cmd": "remove", "name": "fx_adjust"}]
+    assert run("blur the background")[0]["params"] == {"mode": "blur"}
+    assert run("a sea beach behind me")[0]["params"] == {"mode": "image", "image": "/x/beach.jpg"}
+    assert run("purple background")[0]["params"]["mode"] == "color"
+    assert run("remove the background") == [{"cmd": "remove", "name": "fx_background"}]
+    assert run("remove the background")[0]["cmd"] == "add"  # "remove the background" = apply it when it's off
+    assert intents.match("a forest behind me", ch) is None  # no forest photo yet -> Claude
+
+
+# ---------------- "VidAI suggest": live previews, confirm / next / cancel ----------------
+def _sugg_pipe(tmp_path):
+    pl = _pipe(tmp_path)
+    pl.start()
+    return pl
+
+
+def test_suggest_previews_then_next_confirm(tmp_path):
+    pl = _sugg_pipe(tmp_path)
+    assert parse_command("VidAI suggest")["command"] == "suggest"
+    pl.bus.publish("voice_command", {"command": "suggest", "args": "", "text": "VidAI suggest"})
+    assert pl.suggesting and pl.suggesting["i"] == 0
+    first = pl.suggesting["items"][0]
+    names = lambda: {p.name for p in pl.chain.items if not p.name.startswith("_")}
+    shown = names()
+    assert shown  # the first idea is previewed live
+    pl.bus.publish("voice_command", {"command": "next", "args": "", "text": "next"})
+    assert pl.suggesting["i"] == 1 and names() != shown  # first idea undone, second previewed
+    second = pl.suggesting["items"][1]
+    pl.bus.publish("voice_command", {"command": "confirm", "args": "", "text": "confirm"})
+    assert pl.suggesting is None and names()  # kept
+    pl.stop()
+    prefs = pl.profile.pref("suggestions")
+    assert prefs[first["title"]]["no"] == 1 and prefs[second["title"]]["yes"] == 1
+
+
+def test_suggest_cancel_takes_the_preview_back(tmp_path):
+    pl = _sugg_pipe(tmp_path)
+    pl.command({"cmd": "suggest"}, source="gui")
+    assert any(not p.name.startswith("_") for p in pl.chain.items)
+    pl.bus.publish("voice_command", {"command": "deny", "args": "", "text": "cancel"})
+    pl.stop()
+    assert pl.suggesting is None and not any(not p.name.startswith("_") for p in pl.chain.items)
+
+
+def test_suggestions_fit_the_moment(tmp_path):
+    pl = _sugg_pipe(tmp_path)
+    pl.preview_frame = np.full((18, 32, 3), 30, np.uint8)  # a dark picture
+    items = pl._suggestions()
+    assert items[0]["title"] == "Fix the light"
+    pl.command({"cmd": "add", "name": "fx_adjust", "type": "adjust", "params": {"auto": True}})
+    assert "Fix the light" not in [i["title"] for i in pl._suggestions()]  # already on
+    pl.profile.set_pref("suggestions", {"Warmer colours": {"yes": 0, "no": 3}})
+    assert "Warmer colours" not in [i["title"] for i in pl._suggestions()]  # skipped too often
+    pl.stop()
+
+
+def test_claude_question_answers_are_not_eaten_by_suggest_words(tmp_path):
+    pl = _sugg_pipe(tmp_path)
+    pl.command({"cmd": "question", "id_q": "q", "text": "Did you mean", "options": ["Shirt", "Sharper", "Something else"],
+                "speak": False})
+    pl.bus.publish("voice_command", {"command": "next", "args": "", "text": "VidAI something else"})
+    pl.stop()
+    assert [e["data"]["answer"] for e in pl.bus.history if e["kind"] == "answer"] == ["Something else"]

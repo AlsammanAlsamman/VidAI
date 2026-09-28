@@ -15,7 +15,7 @@
   <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec" alt="PyPI vidai-rec"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-34d399" alt="python 3.10+">
   <img src="https://img.shields.io/badge/platform-Linux-ffbf00" alt="Linux">
-  <img src="https://img.shields.io/badge/tests-91%20passing-34d399" alt="61 tests passing">
+  <img src="https://img.shields.io/badge/tests-104%20passing-34d399" alt="61 tests passing">
 </p>
 
 > [!WARNING]
@@ -49,6 +49,10 @@ video and exports a YouTube-ready file. Everything runs locally and for free.
 | 🗣️ **Voice** | *“VidAI record / stop / mark / mistake / new section … / important / zoom in / zoom out / captions on”* — anything else goes to Claude (English for now) |
 | ✨ **Live effects** | Text, logos, arrows and boxes, zoom, blur, live captions — plus new effects Claude writes on the spot (e.g. an object that follows your hand) |
 | 💬 **Talk or type** | Say *“VidAI …”*, hold **ctrl+alt+space** to talk without the wake word, or type in the *Tell VidAI…* box · *“VidAI help”* shows every command |
+| 🎨 **Picture tools** | *“Fix the light”* (auto exposure for dark rooms), brighter / darker, contrast, colourful, black and white, warmer / cooler, sharper — one fast C pass, instant by voice |
+| 🧑‍🎤 **Better cut-out** | Background removal with a real matting model (soft edges, hands and hair kept): blur, colour, photo (*“beach behind me”*) or a moving background |
+| 🤗 **Model hub** | Small open models instead of code: emotion from your face, hand gestures (👍 ✌️ ✋ as triggers), anime and painting styles — VidAI asks, downloads (Hugging Face / MediaPipe) and applies them; *colours like this photo* is learned in milliseconds |
+| 💡 **Suggestions** | *“VidAI suggest”* previews ideas live that fit the moment (dark room → fix the light first) — say *confirm*, *next* or *cancel*; it learns what you like |
 | 🗣️ **VidAI talks** | Say *“VidAI talk”* → *“How can I help you?”* → ask anything; Claude answers in VidAI's own voice (offline, natural), mixed cleanly into the video |
 | ↶ **Undo / redo** | *“VidAI undo”* takes back a whole request (even one that changed several effects), *“VidAI redo”* brings it back |
 | 🙋 **Claude asks you** | When a request is unclear, Claude asks in the window with buttons (*“Which background? blur · purple · beach”*) and tells you what it did — messages that are never recorded |
