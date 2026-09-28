@@ -15,6 +15,10 @@ MODEL_URLS = {
         "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
     "blaze_face_short_range.tflite":
         "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite",
+    "en_US-lessac-medium.onnx":
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+    "en_US-lessac-medium.onnx.json":
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
     "face_landmarker.task":
         "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
 }
@@ -22,7 +26,8 @@ _lock = threading.Lock()
 
 
 def assets_dir() -> Path:
-    d = Path(os.environ.get("VIDAI_HOME", Path.home() / ".vidai")) / "assets"
+    """Downloaded model files are shared (not user data): $VIDAI_ASSETS or ~/.vidai/assets, whatever VIDAI_HOME is."""
+    d = Path(os.environ.get("VIDAI_ASSETS", Path.home() / ".vidai" / "assets"))
     d.mkdir(parents=True, exist_ok=True)
     return d
 

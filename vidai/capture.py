@@ -50,7 +50,7 @@ class CaptureConfig(BaseModel):
     mic: bool = True
     mic_source: str = ""  # pulse source name, "" = default
     audio_offset: float = 0.0  # seconds, + delays audio (fix lip sync)
-    preset: str = "veryfast"
+    preset: str = "superfast"  # live recording: lighter on the CPU (the YouTube export re-encodes anyway)
     crf: int = 21
 
 

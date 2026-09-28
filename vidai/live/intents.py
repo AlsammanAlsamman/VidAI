@@ -41,6 +41,13 @@ def _find(chain, t: str):
     hits = [p for p in fx if w and p.params.get("what") in (w[0], w[1])]
     if not hits and re.search(r"\beyes?\b", t):
         hits = [p for p in fx if type(p).__name__ == "BigEyes"]
+    if not hits:  # any word of the effect's name or text: "remove these numbers", "remove introduction"
+        words = {x for x in re.findall(r"[a-z]{3,}", t)} - {"remove", "removed", "the", "these", "that", "this",
+                                                           "delete", "take", "off", "and", "all", "please", "from"}
+        for p in fx:
+            label = (p.name + " " + str(p.params.get("what", "")) + " " + str(p.params.get("text", ""))).lower()
+            if any(x in label or x.rstrip("s") in label for x in words):
+                hits.append(p)
     return hits
 
 
@@ -50,16 +57,17 @@ def match(text: str, chain) -> list[dict] | None:
     fx = _fx(chain)
 
     # remove
-    if re.search(r"\b(remove|delete|take off|take away|get rid of|hide|clear|stop showing)\b", t):
+    if re.search(r"\b(remove[ds]?|removing|delete[ds]?|deleting|take off|take away|get rid of|hide|clear|"
+                 r"stop showing|reminds)\b", t):
         if re.search(r"\b(all|everything|every effect|effects)\b", t):
             return [{"cmd": "remove", "name": p.name} for p in fx] or None
         hits = _find(chain, t)
         return [{"cmd": "remove", "name": p.name} for p in hits] or None
 
     # bigger / smaller
-    m = re.search(r"\b(bigger|larger|huge|smaller|tiny|tinier|less)\b", t)
+    m = re.search(r"\b(bigger|larger|huge|increase|enlarge|grow|smaller|tiny|tinier|less|decrease|reduce|shrink)\b", t)
     if m and fx:
-        up = m.group(1) in ("bigger", "larger", "huge")
+        up = m.group(1) in ("bigger", "larger", "huge", "increase", "enlarge", "grow")
         hits = _find(chain, t) or ([fx[-1]] if len(t.split()) <= 3 else [])
         out = []
         for p in hits:

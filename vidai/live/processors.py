@@ -81,6 +81,7 @@ class Context:
         self.bus, self.width, self.height = bus, width, height
         self._cache: dict[Any, np.ndarray] = {}
         self.tracks = None  # vidai.live.trackers.Tracks, started when an effect needs it
+        self.quality = 0  # performance level set by the governor: 0 normal, 1 light, 2 minimal
 
     def need_tracking(self) -> None:
         if self.tracks is None:

@@ -44,7 +44,8 @@ PREVIEW_EVERY = 5  # frames (6 Hz at 30 fps)
 class LiveConfig(BaseModel):
     """What runs live. Claude sets this from the brief; everything can be changed during recording."""
     stt: bool = True  # speech to text + voice commands
-    stt_model: str = ""  # tiny | base | small; "" = small for Arabic, base otherwise
+    stt_model: str = ""  # "" = auto: tiny.en for English (fastest), small for Arabic, base otherwise
+    utterance_gap: float = 0.35  # quiet time that ends a spoken command (anchors use min_silence separately)
     stt_language: str | None = "en"  # English only for now; "ar", or None = auto among stt_languages
     stt_languages: list[str] = Field(default_factory=lambda: ["en"])  # auto-detect only among these
     wake_words: list[str] = Field(default_factory=list)  # extra wake words ("vidai" variants are built in)
@@ -60,6 +61,8 @@ class LiveConfig(BaseModel):
     address: str = "Master"  # how VidAI addresses the user
     thinking_position: str = "top-right"
     thinking_timeout: float = 120.0  # hide the icon if Claude has not answered after this many seconds
+    governor: bool = True  # keep 30 fps: lighten tracking/preview under load, warn before switching effects off
+    hw_encode: bool = True  # use the GPU encoder when available
 
 
 class LivePipeline:
@@ -83,7 +86,7 @@ class LivePipeline:
         self.rules = RuleEngine(self.bus, self._rule_action)
         self.learners: dict[str, LiveLearner] = {}
         self.audio = AudioSensor(self.bus, min_silence=min_silence, silence_db=silence_db,
-                                 on_utterance=self._on_utterance)
+                                 on_utterance=self._on_utterance, utterance_gap=self.live.utterance_gap)
         self.motion = MotionSensor(self.bus, scene_threshold=scene_threshold)
         self.stt: SpeechToText | None = None
         self.ocr: ScreenText | None = None
@@ -100,9 +103,29 @@ class LivePipeline:
         self._control_pos = 0
         self.stopped = False
         self.pending: dict[int, dict] = {}  # Claude requests waiting for an answer (seq -> event)
+        # performance governor
+        self.level = 0  # 0 normal, 1 light, 2 minimal
+        self.lag_frames = 0.0
+        self.frame_ms_ema = 0.0
+        self._t0_wall: float | None = None
+        self._level_since = time.monotonic()
+        self._pressure_since: float | None = None
+        self.preview_every = PREVIEW_EVERY
+        self.encoder_name = ""
         # a request to Claude is collected until the user stops talking ("... saying" <pause> "an award")
         self._req: dict | None = None
         self.asks: dict[str, str] = {}  # permission questions waiting for the user (id -> text)
+        self.questions: dict[str, dict] = {}  # Claude's questions to the user (id -> {text, options, t})
+        self.speaking_until = -1.0  # VidAI is talking until this AUDIO time: ignore the mic meanwhile
+        from .voice import Voice
+
+        self.voice = Voice(Path(session_dir) / "voice" if session_dir else None)
+        self.voice_clips: list[tuple[float, str, float]] = []  # (start on the recording clock, wav, seconds)
+        self._talk = False  # "VidAI talk": the next thing the user says is a question for Claude
+        # undo / redo: each request is a group of reversible steps
+        self._txn = 0
+        self.history: list[dict] = []  # {"txn", "undo": [cmds], "redo": [cmds]}
+        self.redo_stack: list[dict] = []
         # learning (vidai.profile): what each request did, so mistakes and good solutions are remembered
         from ..profile import Profile
 
@@ -136,7 +159,8 @@ class LivePipeline:
         recording = bool(self.output)  # preview runs voice (so "VidAI record" works) but not OCR
         if self.live.stt and has_audio:
             lang = self.live.stt_language
-            model = self.live.stt_model or ("small" if lang and "ar" in lang else "base")
+            model = self.live.stt_model or ("tiny.en" if lang == "en" else "small" if lang and "ar" in lang
+                                            else "base")
             self.stt = SpeechToText(self.bus, model, lang if lang and "+" not in lang else None,
                                     wake_words=(self.live.wake_words + WAKE) if self.live.wake_words else None,
                                     allowed_languages=self.live.stt_languages)
@@ -144,7 +168,7 @@ class LivePipeline:
         if self.live.ocr and recording:
             self.ocr = ScreenText(self.bus, self.live.ocr_interval, self.live.ocr_langs)
         self.bus.subscribe(self._on_voice, {"voice_command"})
-        self.bus.subscribe(self._on_speech_for_request, {"speech_start", "transcript"})
+        self.bus.subscribe(self._on_speech_for_request, {"speech_start", "speech_end", "transcript"})
         self.bus.subscribe(self._on_claude_request, {"claude"})
         for p in self.live.processors:
             self.command({"cmd": "add", **p}, source="config")
@@ -172,10 +196,12 @@ class LivePipeline:
             self._spawn(self._audio_loop, atap)
         # ffmpeg B: video encoder
         if self.output:
+            hw = ffmpeg.hw_encoder() if self.live.hw_encode else None
+            enc = hw or ["-c:v", "libx264", "-preset", self.cfg.preset, "-crf", str(self.cfg.crf), "-pix_fmt", "yuv420p"]
+            self.encoder_name = "h264_vaapi (GPU)" if hw else f"libx264 {self.cfg.preset}"
             b_cmd = [ffmpeg.ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
                      "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.W}x{self.H}", "-r", str(self.fps),
-                     "-i", "pipe:0", "-c:v", "libx264", "-preset", self.cfg.preset, "-crf", str(self.cfg.crf),
-                     "-pix_fmt", "yuv420p", "-g", str(self.fps * 2),
+                     "-i", "pipe:0", *enc, "-g", str(self.fps * 2),
                      "-flush_packets", "1", "-cluster_time_limit", "1000", str(self.video_part)]
             self.enc = subprocess.Popen(b_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
@@ -225,6 +251,9 @@ class LivePipeline:
                 break
             t0 = time.perf_counter()
             t = self.frames / self.fps
+            if self._t0_wall is None:
+                self._t0_wall = time.monotonic()
+            self.lag_frames = (time.monotonic() - self._t0_wall) * self.fps - self.frames  # >0 = behind real time
             frame = np.frombuffer(buf, np.uint8).reshape(self.H, self.W, 3)
             if any(p.enabled for p in self.chain.items):
                 frame = frame.copy()
@@ -238,30 +267,33 @@ class LivePipeline:
                 except (BrokenPipeError, OSError):
                     enc_in = None
                     self.bus.publish("error", {"where": "encoder", "error": "encoder closed its input"})
-            if self.frames % PREVIEW_EVERY == 0:
+            if self.frames % self.preview_every == 0:
                 small = cv2.resize(frame, (PREVIEW_W, PREVIEW_H), interpolation=cv2.INTER_AREA)
                 if self.pending and self.live.thinking == "preview" and self._thinking:
                     small = self._thinking.process(np.ascontiguousarray(small), t, self.ctx)
                 self.preview_frame = small
                 if self.on_frame:
                     self.on_frame(small)
-                if self.frames % (PREVIEW_EVERY * 3) == 0:  # 2 Hz
+                if self.frames % (self.preview_every * 3) == 0:  # 2 Hz
                     self.motion.feed(small, t)
                     if self.ocr:
                         self.ocr.notify_motion(self.motion.values[-1])
                 for l in list(self.learners.values()):
                     l.feed(small, t)
-            if self.ctx.tracks is not None:
+            if self.ctx.tracks is not None and self.frames % (1 + self.level) == 0:  # lighter under load
                 self.ctx.tracks.feed(frame)
             if self.ocr and self.ocr.want(t):
                 self.ocr.submit(frame, t)
             self.frames += 1
-            ms_acc += (time.perf_counter() - t0) * 1000
+            ms = (time.perf_counter() - t0) * 1000
+            self.frame_ms_ema = 0.9 * self.frame_ms_ema + 0.1 * ms
+            ms_acc += ms
             n_perf += 1
             if time.monotonic() - t_perf >= 5.0:
                 self.loop_ms = ms_acc / n_perf
                 self.bus.publish("perf", {"fps": round(n_perf / (time.monotonic() - t_perf), 1),
-                                          "frame_ms": round(self.loop_ms, 2),
+                                          "frame_ms": round(self.loop_ms, 2), "lag_frames": round(self.lag_frames),
+                                          "level": self.level, "encoder": self.encoder_name,
                                           "active_processors": [p.name for p in self.chain.items if p.enabled]})
                 t_perf, n_perf, ms_acc = time.monotonic(), 0, 0.0
         if enc_in:
@@ -302,6 +334,11 @@ class LivePipeline:
                 pass
             self._flush_request()
             self._check_probation()
+            for qid, q in list(self.questions.items()):  # nobody answered for 90 s: close the question
+                if time.monotonic() - q.get("t", time.monotonic()) > 90:
+                    self.command({"cmd": "cancel_question", "question": qid}, source="timeout")
+            if self.live.governor:
+                self._govern()
             if self.pending:
                 oldest = min(p["t"] for p in self.pending.values())
                 if self.clock() - oldest > self.live.thinking_timeout:
@@ -312,7 +349,7 @@ class LivePipeline:
 
     # ------------------------------------------------------------------ events -> actions
     def _on_claude_request(self, ev: dict) -> None:
-        if ev["data"].get("source") not in ("voice", "user", "gui"):
+        if ev["data"].get("source") not in ("voice", "user", "gui", "talk", "typed"):
             return  # rules' notify_claude does not show the icon
         self.pending[ev["seq"]] = {"t": ev["t"], "message": ev["data"].get("message", "")}
         self._show_thinking(True)
@@ -333,16 +370,33 @@ class LivePipeline:
         self.bus.publish("action", {"what": "thinking_on" if on else "thinking_off", "pending": len(self.pending)})
 
     def _on_utterance(self, samples: np.ndarray, start: float, end: float) -> None:
+        if start < self.speaking_until:  # that was VidAI's own voice from the speakers
+            self.bus.publish("action", {"what": "ignored_own_voice", "start": round(start, 2)})
+            return
         if self.stt:
             self.stt.submit(samples, start, end)
 
     def _on_voice(self, ev: dict) -> None:
         d = ev["data"]
         cmd, args = d["command"], d.get("args", "")
+        if cmd == "claude" and self.questions and args.strip():  # maybe an answer to Claude's question
+            q = self.questions[list(self.questions)[-1]]
+            if not q["options"] or _match_option(args, q["options"]) in q["options"]:
+                self.command({"cmd": "answer", "text": args}, source="voice")
+                return
+            # not one of the options: it's a new request, the question stays open
+        if cmd in ("undo", "redo", "help", "lighter"):
+            self.command({"cmd": cmd}, source="voice")
+            return
+        if cmd == "talk":
+            self.command({"cmd": "talk"}, source="voice")
+            return
         if cmd == "claude":
             if args.strip():  # an empty request is never sent to Claude
                 self._req = {"parts": [args.strip()], "due": time.monotonic() + self.request_gap,
-                             "waiting": False, "cap": time.monotonic() + 20.0, "seq": ev["seq"]}
+                             "waiting": False, "cap": time.monotonic() + 20.0, "seq": ev["seq"],
+                             "source": "talk" if self._talk else "voice"}
+                self._talk = False
                 self.bus.publish("action", {"what": "listening_request", "so_far": args.strip()})
                 self._flush_if_obvious()
             return
@@ -393,12 +447,144 @@ class LivePipeline:
             elif self.learners:
                 self.command({"cmd": "wrong", "name": list(self.learners)[-1]}, source="voice")
 
+    # ------------------------------------------------------------------ undo / redo
+    def _inverse(self, cmd: str | None, c: dict) -> list[dict] | None:
+        """Commands that undo `cmd` (captured before it runs)."""
+        if cmd in ("add", "text", "zoom", "shape", "image", "blur"):
+            name = c.get("name") or (cmd if cmd == "zoom" else None)
+            before = self.chain.get(name) if name else None
+            undo = [{"cmd": "remove", "name": name}] if name else [{"cmd": "remove_last_added"}]
+            if before is not None and getattr(before, "spec", None):
+                undo.append({**before.spec, "params": dict(before.params)})
+            return undo
+        if cmd == "remove":
+            p = self.chain.get(c.get("name"))
+            if p is not None and getattr(p, "spec", None):
+                return [{**p.spec, "params": dict(p.params)}]
+            return []
+        if cmd == "set":
+            p = self.chain.get(c.get("name"))
+            if p is not None:
+                return [{"cmd": "set", "name": p.name, "params": {k: p.params.get(k) for k in c.get("params", {})}}]
+        if cmd in ("enable", "disable"):
+            p = self.chain.get(c.get("name"))
+            if p is not None:
+                return [{"cmd": "enable" if p.enabled else "disable", "name": p.name}]
+        return None
+
+    def _record(self, inverse: list[dict], forward: dict, source: str) -> None:
+        if self.history and self.history[-1]["txn"] == self._txn:
+            self.history[-1]["undo"] = inverse + self.history[-1]["undo"]
+            self.history[-1]["redo"].append(forward)
+        else:
+            self.history.append({"txn": self._txn, "undo": list(inverse), "redo": [forward]})
+        del self.history[:-50]
+
+    def undo(self) -> dict:
+        if not self.history:
+            self.notify("Nothing to undo")
+            return {"undone": 0}
+        step = self.history.pop()
+        for c in step["undo"]:
+            self.command(dict(c), source="undo")
+        self.redo_stack.append(step)
+        self.notify("↶ Undone")
+        return {"undone": len(step["redo"])}
+
+    def redo(self) -> dict:
+        if not self.redo_stack:
+            self.notify("Nothing to redo")
+            return {"redone": 0}
+        step = self.redo_stack.pop()
+        for c in step["redo"]:
+            self.command(dict(c), source="undo")
+        self.history.append(step)
+        self.notify("↷ Redone")
+        return {"redone": len(step["redo"])}
+
+    # ------------------------------------------------------------------ talking to the user (never recorded)
+    def notify(self, text: str, kind: str = "info", seconds: float = 3.5) -> None:
+        """A short message for the user, shown on the preview/window only (not burned into the video)."""
+        self.bus.publish("notify", {"text": text, "kind": kind, "seconds": seconds})
+
+    def help_card(self) -> dict:
+        from ..profile import Profile
+        from .stickers import WORDS
+
+        prof = Profile()
+        lines = ["Say “VidAI …” then:",
+                 "record · stop · mark · mistake · new section <title> · important",
+                 "zoom in / out · captions on / off · undo · redo · lighter",
+                 "add <thing> in my hand / on my head / on my eyes  (apple, crown, sunglasses …)",
+                 "make my eyes pop · text above my head saying … · remove <thing> / everything",
+                 "take all actions · ask me first · confirm / deny",
+                 "anything else → Claude (the eye icon shows while Claude works)"]
+        macros = [m["phrase"] for m in prof.macros()][-6:]
+        if macros:
+            lines.append("Your shortcuts: " + " · ".join(macros))
+        lib = sorted(f.stem for f in (prof.dir.parent / "effects").glob("*.py")) if (prof.dir.parent / "effects").exists() else []
+        if lib:
+            lines.append("Saved effects: " + " · ".join(lib[:8]))
+        lines.append(f"{len(WORDS)} stickers · hold ctrl+alt+space to talk without “VidAI” · or type below")
+        self.bus.publish("help", {"lines": lines, "seconds": 14})
+        return {"lines": len(lines)}
+
+    def listen(self, seconds: float = 6.0) -> None:
+        """Push-to-talk: the next thing the user says is a command (no wake word needed)."""
+        if self.stt:
+            self.stt.armed_until = self._audio_now() + seconds
+        self.notify("🎙 Listening… say the command", "listen", seconds)
+
+    def _govern(self) -> None:
+        """Keep the recording at full frame rate. Pressure = falling behind real time or frames near the budget."""
+        if self._t0_wall is None or time.monotonic() - self._t0_wall < 3:
+            return
+        now = time.monotonic()
+        budget = 1000.0 / self.fps
+        pressure = self.lag_frames > 12 or self.frame_ms_ema > 0.75 * budget
+        relaxed = self.lag_frames < 4 and self.frame_ms_ema < 0.4 * budget
+        if pressure:
+            self._pressure_since = self._pressure_since or now
+            if self.level < 2 and now - self._level_since > 1.5:
+                self._set_level(self.level + 1)
+            elif self.level == 2 and now - self._pressure_since > 8 and self.lag_frames > 30:
+                heavy = [p for p in self.chain.items if p.enabled and p.calls and not p.name.startswith("_")]
+                if heavy:
+                    worst = max(heavy, key=lambda p: p.total_ms / p.calls)
+                    worst.enabled = False
+                    self.bus.publish("warning", {"what": "performance", "text":
+                                     f"Turned off '{worst.name}' to keep the video smooth "
+                                     f"({worst.total_ms / worst.calls:.0f} ms per frame). Say 'VidAI, lighter' or "
+                                     f"remove other effects, then turn it on again."})
+                    self._pressure_since = now
+        else:
+            self._pressure_since = None
+            if relaxed and self.level > 0 and now - self._level_since > 6:
+                self._set_level(self.level - 1)
+
+    def _set_level(self, level: int) -> None:
+        self.level = level
+        self._level_since = time.monotonic()
+        self.preview_every = PREVIEW_EVERY * (1 + level)  # fewer preview frames under load
+        if self.ctx.tracks is not None:
+            self.ctx.tracks.max_hz = (30, 15, 8)[level]
+        if self.ocr:
+            self.ocr.interval = (self.live.ocr_interval, self.live.ocr_interval * 2, self.live.ocr_interval * 4)[level]
+        self.ctx.quality = level  # effects may read it (e.g. run heavy models less often)
+        text = ("Performance: normal", "Performance: light mode (tracking and preview slower) to keep 30 fps",
+                "Performance: minimal mode — the computer is busy; fewer effects will keep the video smooth")[level]
+        self.bus.publish("warning" if level else "action", {"what": "performance", "level": level, "text": text})
+
     def _on_speech_for_request(self, ev: dict) -> None:
         r = self._req
         if r is None:
             return
         if ev["kind"] == "speech_start":  # the user keeps talking: wait for that transcript
             r["waiting"] = True
+            r["talking"] = True
+        elif ev["kind"] == "speech_end":  # they stopped: the transcript follows within ~1-2 s
+            r["talking"] = False
+            r["transcript_due"] = time.monotonic() + 2.5
         elif ev["kind"] == "transcript" and not ev["data"].get("is_command") and ev["seq"] > r["seq"]:
             r["parts"].append(ev["data"]["text"].strip())
             r["waiting"] = False
@@ -412,7 +598,7 @@ class LivePipeline:
         from .intents import match
 
         r = self._req
-        if r is None:
+        if r is None or r.get("source") == "talk":  # a question is never a shortcut: wait for all of it
             return
         msg = " ".join(" ".join(p.rstrip(".…") for p in r["parts"]).split())
         unfinished = _re.search(r"\b(saying|says|say|with|and|the|a|an|to|on|in|my|of|that|above|over)\s*$",
@@ -426,29 +612,32 @@ class LivePipeline:
             return
         now = time.monotonic()
         if force or now >= r["cap"] or (not r["waiting"] and now >= r["due"]) or \
-                (r["waiting"] and now >= r["due"] + 3.0):  # speech started but no transcript came
+                (r["waiting"] and not r.get("talking") and now >= r.get("transcript_due", r["due"] + 3.0)):
+            # (a long correction like "add 1, 2, 3, 4, 5" is waited for until its transcript arrives)
             self._req = None
             msg = " ".join(" ".join(p.rstrip(".…") for p in r["parts"]).replace("...", " ").split())
-            self.request(msg, source="voice")
+            self.request(msg, source=r.get("source", "voice"))
 
     def request(self, msg: str, source: str = "voice") -> dict:
         """A request in plain words: handled locally when VidAI understands it (fast path, < 1 s),
         otherwise sent to Claude (thinking icon until Claude answers)."""
         from .intents import match
 
+        self._txn += 1  # everything this request does can be undone as one step
+        self.redo_stack.clear()
         fixed = self.profile.correct(msg)
         if fixed != msg:
             self.bus.publish("action", {"what": "corrected", "heard": msg, "meant": fixed})
             msg = fixed
         via, cmds = "memory", None
-        macro = self.profile.find_macro(msg)
+        macro = None if source == "talk" else self.profile.find_macro(msg)
         if macro:
             cmds = [dict(c) for c in macro["commands"]]
             self.profile.used_macro(macro["phrase"])
         else:
             via = "fast"
             try:
-                cmds = match(msg, self.chain)
+                cmds = None if source == "talk" else match(msg, self.chain)
             except Exception as e:
                 self.bus.publish("error", {"where": "fast_path", "error": repr(e)[:200]})
             cmds = [self._apply_prefs(c) for c in cmds] if cmds else None
@@ -468,7 +657,8 @@ class LivePipeline:
                 self._learned("preference", hands_swapped=self.profile.pref("hands_swapped"))
             return {"handled": via, "commands": cmds}
         self._claude_req = rec
-        self.bus.publish("claude", {"message": msg, "source": source})
+        self.bus.publish("claude", {"message": msg, "source": source,
+                                    **({"reply": "voice"} if source == "talk" else {})})
         return {"handled": "claude"}
 
     # ------------------------------------------------------------------ learning
@@ -528,6 +718,8 @@ class LivePipeline:
             self._claude_req["cmds"].append({"cmd": cmd, **{k: v for k, v in c.items() if k != "for"}})
             if cmd in ("add", "text", "zoom", "shape", "image", "blur"):
                 self._claude_req["names"].append(name or cmd)
+        if cmd == "question" and self._claude_req is not None:
+            self._claude_req["asked"] = True  # needed clarification: the words alone don't define the answer
         if cmd == "done" and self._claude_req is not None:
             if self._claude_req["cmds"]:
                 self._probation.append({**self._claude_req, "t_done": self.clock()})
@@ -540,6 +732,9 @@ class LivePipeline:
             if now - p["t_done"] >= 20:
                 self._probation.remove(p)
                 alive = [self.chain.get(n) for n in p["names"]]
+                if p.get("asked") or any(c.get("cmd") not in ("add", "text", "zoom", "shape", "image", "blur",
+                                                              "rule", "mark") for c in p["cmds"]):
+                    continue  # set/remove/enable... depend on what is on screen now: replayed later they'd be wrong
                 if (not p["names"]) or any(q is not None and q.enabled for q in alive):
                     self.profile.add_macro(p["msg"], p["cmds"])
                     self._learned("macro", request=p["msg"])
@@ -602,7 +797,10 @@ class LivePipeline:
         except Exception as e:
             self.bus.publish("error", {"where": "learning", "error": repr(e)[:200]})
         try:
+            inverse = self._inverse(cmd, c) if source not in ("undo", "carry", "config") else None
             res = self._do(cmd, c, t)
+            if inverse is not None:
+                self._record(inverse, {"cmd": cmd, **c}, source)
             self.bus.publish("ack", {"command": cmd, "source": source, **tag, **(res or {})})
             return res or {}
         except Exception as e:
@@ -706,7 +904,7 @@ class LivePipeline:
             self.say(f"{self.live.address}, I need to {text}. Say VidAI confirm, or VidAI deny.")
             self.bus.publish("action", {"what": "asking", "request": rid, "text": text})
             if self.stt:  # a bare "yes" / "confirm" right after the question is enough
-                self.stt.armed_until = self.clock() + 25
+                self.stt.armed_until = self._audio_now() + 25
             return {"request": rid, "state": "pending"}
         if cmd in ("confirm", "deny"):
             rid = str(c.get("request") or (list(self.asks)[-1] if self.asks else ""))
@@ -730,12 +928,102 @@ class LivePipeline:
                     self.asks.pop(rid)
                     self.bus.publish("permission", {"request": rid, "state": "approved", "by": "full_access"})
             return {"mode": mode}
+        if cmd == "talk":  # "VidAI talk": VidAI asks, the next sentence is a question for Claude
+            self._talk = True
+            self.say("How can I help you?")
+            if self.stt:  # no wake word needed for the question (armed after VidAI stops talking)
+                self.stt.armed_until = max(self._audio_now(), self.speaking_until) + 10
+            self.notify("🎙 Ask your question…", "listen", 8)
+            return {"talk": True}
+        if cmd == "say":  # Claude answers out loud (and optionally as a subtitle in the video)
+            text = str(c.get("text", "")).strip()
+            if text:
+                self.say(text, record=c.get("record", True))
+                if c.get("subtitle"):
+                    dur = 1.5 + 0.42 * len(text.split())
+                    self._do("text", {"name": self._temp_name("answer"), "text": text, "position": "bottom-center",
+                                      "size": 0.04, "for": dur}, t)
+                elif c.get("notify", True):
+                    self.notify("VidAI: " + text, "claude", 3 + 0.3 * len(text.split()))
+            return {"said": bool(text), "engine": self.voice.engine}
+        if cmd == "record":  # Claude (or a typed/voice request) starts the recording from preview
+            if self.on_start_request and not self.output:
+                self.on_start_request()
+                return {"recording": "starting"}
+            return {"recording": bool(self.output)}
+        if cmd == "undo":
+            return self.undo()
+        if cmd == "redo":
+            return self.redo()
+        if cmd == "help":
+            return self.help_card()
+        if cmd == "lighter":
+            self._set_level(min(2, self.level + 1))
+            return {"level": self.level}
+        if cmd == "listen":
+            self.listen(float(c.get("seconds", 6)))
+            return {"listening": True}
+        if cmd == "notify":  # Claude -> user message (window only)
+            self.notify(c.get("text", ""), c.get("kind", "claude"), float(c.get("seconds", 5)))
+            return {"notified": True}
+        if cmd == "question":  # Claude asks the user; answer by button, typing or voice
+            qid = str(c["id_q"])
+            self.questions[qid] = {"text": c["text"], "options": list(c.get("options") or []), "t": time.monotonic()}
+            self.bus.publish("question", {"question": qid, "text": c["text"], "options": self.questions[qid]["options"]})
+            if c.get("speak", True):
+                opts = self.questions[qid]["options"]
+                self.say(c["text"] + (" Options: " + ", ".join(opts) + "." if opts else ""))
+            if self.stt:
+                self.stt.armed_until = self._audio_now() + 30
+            return {"question": qid}
+        if cmd == "cancel_question":
+            qid = str(c.get("question") or "")
+            q = self.questions.pop(qid, None) if qid else None
+            if q is None and not qid and self.questions:
+                self.questions.clear()
+                q = True
+            if q is not None:
+                self.bus.publish("answer", {"question": qid, "answer": None, "cancelled": True})
+            return {"cancelled": q is not None}
+        if cmd == "answer":
+            if not self.questions:
+                return {"state": "no question"}
+            qid = str(c.get("question") or list(self.questions)[-1])
+            q = self.questions.pop(qid, None)
+            if q is None:
+                return {"state": "unknown question"}
+            ans = _match_option(c.get("text", ""), q["options"])
+            self.bus.publish("answer", {"question": qid, "answer": ans, "said": c.get("text", ""), "by": c.get("by", "user")})
+            self.notify(f"✓ {ans}", "ok")
+            return {"question": qid, "answer": ans}
+        if cmd == "remove_last_added":
+            fx = [p for p in self.chain.items if not p.name.startswith("_")]
+            return {"removed": self.chain.remove(fx[-1].name) if fx else False}
         if cmd == "thinking":  # Claude shows the icon itself while working on something longer
             self._show_thinking(bool(c.get("on", True)))
             return {"thinking": bool(c.get("on", True))}
         if cmd == "status":
             return self.status()
         raise ValueError(f"unknown command {cmd!r}")
+
+    def summary(self) -> dict:
+        """What happened in this recording, for the user (window) and Claude."""
+        import collections
+
+        reqs = self.requests_log
+        via = collections.Counter(r["via"] for r in reqs)
+        effects = sorted({n for r in reqs for n in r["names"]})
+        tips = []
+        if via.get("claude"):
+            tips.append("Requests Claude solved and you kept become instant next time.")
+        if any(r["removed"] for r in reqs):
+            tips.append("Effects you removed right away were noted as mistakes; say what you meant next time.")
+        if self.level:
+            tips.append("The computer was busy: fewer or lighter effects keep the video smooth.")
+        return {"requests": len(reqs), "instant": via.get("fast", 0) + via.get("memory", 0),
+                "by_claude": via.get("claude", 0), "effects": effects, "learned": list(self.learned),
+                "undo_used": sum(1 for e in self.bus.history if e["kind"] == "ack"
+                                 and e["data"].get("command") == "undo"), "tips": tips}
 
     def _remember_session(self) -> None:
         import collections
@@ -760,14 +1048,38 @@ class LivePipeline:
             "learned": self.learned,
         })
 
-    def say(self, text: str) -> None:
-        """VidAI speaks (text-to-speech) and logs it, so the editor can cut these moments later."""
+    def say(self, text: str, record: bool = True) -> None:
+        """VidAI speaks: offline voice (Piper) on the speakers, and — while recording — the same clip is mixed
+        cleanly into the video at stop. While it talks (+0.6 s) the mic is ignored, so VidAI never answers itself."""
         self.bus.publish("action", {"what": "vidai_said", "text": text})
-        if self.live.speak and shutil.which("spd-say"):
+        if not self.live.speak or self.voice.engine == "none":
+            return
+        est = 0.8 + 0.42 * len(text.split())
+        self.speaking_until = max(self.speaking_until, self._audio_now() + est)
+
+        def run() -> None:
             try:
-                subprocess.Popen(["spd-say", "-r", "5", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError:
-                pass
+                clip = self.voice.synth(text)
+                if clip:
+                    path, dur = clip
+                    t0 = self.clock()  # video time: where the clip goes in the final mix
+                    self.speaking_until = max(self.speaking_until, self._audio_now() + dur + 0.8)
+                    if self.output and record:
+                        self.voice_clips.append((round(t0, 3), str(path), round(dur, 3)))
+                        self.bus.publish("action", {"what": "vidai_voice", "t": round(t0, 3), "path": str(path),
+                                                    "seconds": round(dur, 3), "text": text})
+                    self.voice.play(path)
+                else:
+                    self.voice.speak_fallback(text)
+            except Exception as e:
+                self.bus.publish("error", {"where": "voice", "error": repr(e)[:200]})
+            self.speaking_until = max(self.speaking_until, self._audio_now() + 0.8)  # speaker + mic latency
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _audio_now(self) -> float:
+        """Current time on the audio clock (what utterance start/end times use); video clock if no mic."""
+        return self.audio.t if self.audio.written else self.clock()
 
     def carry_specs(self) -> list[dict]:
         """Lasting effects that are on now (added in preview) -> re-added when the recording starts."""
@@ -816,7 +1128,7 @@ class LivePipeline:
             th.join(3)
         if self.output:
             try:
-                mux_parts(self.video_part, self.audio_part, self.output)
+                mux_parts(self.video_part, self.audio_part, self.output, self.voice_clips)
             except Exception as e:
                 self.error = f"mux: {e}"
                 self.bus.publish("error", {"where": "mux", "error": str(e)[:300]})
@@ -837,9 +1149,11 @@ class LivePipeline:
         shutil.rmtree(self._tmp, ignore_errors=True)
 
 
-def mux_parts(video_part: str | Path | None, audio_part: str | Path | None, output: str | Path) -> Path:
-    """Join the separately recorded video and audio tracks into the final file (stream copy, lossless),
-    then delete the parts. Tolerates truncated parts (crash recovery)."""
+def mux_parts(video_part: str | Path | None, audio_part: str | Path | None, output: str | Path,
+              voice_clips: list[tuple[float, str, float]] | None = None) -> Path:
+    """Join the separately recorded video and audio tracks into the final file, then delete the parts.
+    Video is always copied (lossless). With VidAI voice clips, they are mixed into the audio at their times and
+    the microphone is turned down under them (no echo). Tolerates truncated parts (crash recovery)."""
     output = Path(output)
     vp = Path(video_part) if video_part else None
     ap = Path(audio_part) if audio_part else None
@@ -849,11 +1163,52 @@ def mux_parts(video_part: str | Path | None, audio_part: str | Path | None, outp
     has_a = bool(ap and ap.exists() and ap.stat().st_size > 256)
     if has_a:
         args += ["-err_detect", "ignore_err", "-i", str(ap)]
+    clips = [c for c in (voice_clips or []) if Path(c[1]).exists()]
     tmp = output.with_name(output.stem + ".muxing.mkv")
-    args += ["-map", "0:v"] + (["-map", "1:a"] if has_a else []) + ["-c", "copy", str(tmp)]
+    if clips:
+        first = 2 if has_a else 1
+        for _, path, _ in clips:
+            args += ["-i", path]
+        g = []
+        mix = []
+        if has_a:
+            duck = "+".join(f"between(t,{t0:.3f},{t0 + d + 0.3:.3f})" for t0, _, d in clips)
+            g.append(f"[1:a]volume=0.2:enable='{duck}'[mic]")
+            mix.append("[mic]")
+        for i, (t0, _, _) in enumerate(clips):
+            g.append(f"[{first + i}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                     f"adelay={int(t0 * 1000)}:all=1[v{i}]")
+            mix.append(f"[v{i}]")
+        g.append(f"{''.join(mix)}amix=inputs={len(mix)}:normalize=0:duration={'first' if has_a else 'longest'}[aout]")
+        args += ["-filter_complex", ";".join(g), "-map", "0:v", "-map", "[aout]", "-c:v", "copy",
+                 "-c:a", "aac", "-b:a", "192k", str(tmp)]
+    else:
+        args += ["-map", "0:v"] + (["-map", "1:a"] if has_a else []) + ["-c", "copy", str(tmp)]
     ffmpeg.run(args)
     os.replace(tmp, output)
     vp.unlink(missing_ok=True)
     if ap:
         ap.unlink(missing_ok=True)
     return output
+
+
+_NUMBERS = {"one": 0, "first": 0, "1": 0, "two": 1, "second": 1, "2": 1, "three": 2, "third": 2, "3": 2,
+            "four": 3, "fourth": 3, "4": 3, "five": 4, "fifth": 4, "5": 4}
+
+
+def _match_option(text: str, options: list[str]) -> str:
+    """Map a spoken/typed answer to one of the options ("the second", "blur", "option two"...)."""
+    import difflib
+    import re as _re
+
+    t = _re.sub(r"[^\w\s]", " ", text.lower()).strip()
+    if not options:
+        return text.strip()
+    for w in t.split():
+        if w in _NUMBERS and _NUMBERS[w] < len(options):
+            return options[_NUMBERS[w]]
+    for o in options:
+        if o.lower() in t or t in o.lower():
+            return o
+    best = max(options, key=lambda o: difflib.SequenceMatcher(None, t, o.lower()).ratio())
+    return best if difflib.SequenceMatcher(None, t, best.lower()).ratio() > 0.45 else text.strip()

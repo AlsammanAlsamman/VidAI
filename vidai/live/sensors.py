@@ -26,9 +26,10 @@ BLOCK = SR // 10  # 100 ms
 
 class AudioSensor:
     def __init__(self, bus, min_silence: float = 0.5, silence_db: float | None = None, keep_seconds: float = 40.0,
-                 on_utterance=None) -> None:
+                 on_utterance=None, utterance_gap: float | None = None) -> None:
         self.bus = bus
         self.min_silence = min_silence
+        self.utterance_gap = utterance_gap or min_silence  # end of a spoken sentence (faster than anchor pauses)
         self.fixed_db = silence_db
         self.levels: list[float] = []  # full history at 10 Hz (becomes the audio_level anchor series)
         self.ring = np.zeros(int(SR * keep_seconds), np.float32)
@@ -72,7 +73,7 @@ class AudioSensor:
             self._last_loud = t
             self.bus.publish("loud", {"db": round(db, 1)}, t)
         thr = self.threshold()
-        need_quiet = max(1, int(round(self.min_silence * 10)))
+        need_quiet = max(1, int(round(self.utterance_gap * 10)))
         if db >= thr:
             self.run_loud += 1
             self.run_quiet = 0
@@ -137,10 +138,17 @@ class MotionSensor:
 WAKE = ["vidai", "vid ai", "video ai", "vid-ai", "vidia", "vidi", "veedai", "fidai", "فيداي", "في داي", "فيدي", "فيديو اي"]
 
 COMMANDS: list[tuple[str, list[str]]] = [  # (command, trigger phrases) — English + Arabic
-    ("record", ["start recording", "record", "start", "ابدأ التسجيل", "ابدأ", "سجل"]),
+    ("record", ["start recording", "starts recording", "start the recording", "begin recording", "recording",
+                "record", "start", "ابدأ التسجيل", "ابدأ", "سجل"]),
     ("full_access", ["take all actions", "take all the actions", "full access", "you have my permission",
                      "do everything", "all permissions", "you have full access"]),
     ("ask_first", ["ask me first", "ask first", "ask permission", "ask for permission"]),
+    ("talk", ["talk", "talk to me", "let's talk", "lets talk", "i have a question", "can i ask you",
+              "question", "answer me", "too", "tok", "torque", "taught", "talked", "tuck"]),
+    ("undo", ["undo", "undo that", "go back", "take that back", "revert"]),
+    ("redo", ["redo", "redo that", "do it again"]),
+    ("help", ["help", "what can i say", "what can you do", "show commands", "commands"]),
+    ("lighter", ["lighter", "light mode", "go lighter", "be faster", "faster"]),
     ("confirm", ["confirm", "confirmed", "yes", "yes please", "go ahead", "do it", "approve", "approved", "allow",
                  "okay", "ok"]),
     ("deny", ["deny", "denied", "no", "no thanks", "cancel", "don't", "do not", "reject"]),
@@ -264,12 +272,15 @@ class SpeechToText:
             samples, start, end = item
             try:
                 lang = self.language
-                if lang is None and self.allowed:
+                english_only = self.model_name.endswith(".en")
+                if english_only:
+                    lang = None  # .en models are English by design (no language option)
+                if lang is None and self.allowed and not english_only:
                     _, _, probs = self.model.detect_language(samples)
                     p = dict(probs)
                     lang = max(self.allowed, key=lambda l: p.get(l, 0.0))
                 # bias decoding toward the wake word, otherwise "VidAI" comes out as "VidI" / "We die"
-                hot = "VidAI فيداي" if lang in (None, "ar") else "VidAI"  # noqa: RUF001
+                hot = "VidAI فيداي" if lang in (None, "ar") and not english_only else "VidAI"  # noqa: RUF001
                 if self.profile is not None:
                     hot = hot.replace("VidAI", self.profile.hotwords())
                 segs, info = self.model.transcribe(samples, language=lang, beam_size=1, vad_filter=True,

@@ -20,7 +20,8 @@ claude {message,source}  <- the user asked YOU something by voice ("VidAI make t
 screen_text {text,lines,new_lines}  (OCR, if on)    marker {type,note,source}
 learner {name,label,confidence}                     window_focus {title}
 action {...} what the recorder did                  ack/error {command,...} results of your commands
-perf {fps,frame_ms,active_processors}
+perf {fps,frame_ms,active_processors,level,encoder}   warning {what:"performance", level, text}
+notify {text,kind}   help {lines}   question {question,text,options}   answer {question,answer,said,by}
 Voice commands built in: "VidAI" + mark | mistake | new section <title> | important | zoom in | zoom out |
 captions on/off | learn <name> | label <value> | wrong | stop | anything else -> claude event. Arabic works too
 (فيداي علامة / خطأ / قسم جديد ... / مهم / تكبير / تصغير / إيقاف).""",
@@ -42,6 +43,13 @@ captions on/off | learn <name> | label <value> | wrong | stop | anything else ->
 {"cmd":"mark","type":"section|important|mistake|marker","note":"..."}
 {"cmd":"learn","name":"slide","labels":["yes","no"],"region":[x,y,w,h]?}  {"cmd":"label","name":"slide","value":"yes"}
 {"cmd":"wrong","name":"slide"}  {"cmd":"forget","name":"slide"}
+{"cmd":"undo"}  {"cmd":"redo"}   (one request = one step)   {"cmd":"help"}   {"cmd":"lighter"}
+{"cmd":"notify","text":"...","seconds":5}   message in the window only (never recorded) — or live_notify(...)
+{"cmd":"listen","seconds":6}   push-to-talk: next utterance is a command without "VidAI"
+Questions: live_ask_user(session, "Which background?", ["blur","purple","beach"]) -> {"answer": "purple"}
+Talk: "VidAI talk" -> VidAI says "How can I help you?" -> the next sentence arrives with reply="voice" ->
+      answer with live_say(session, text, subtitle=False) = {"cmd":"say","text":...}: offline voice (Piper)
+      on the speakers and mixed into the video (mic ducked under it).
 {"cmd":"stt","on":true,"language":"ar"}  {"cmd":"ocr","on":true,"interval":2}  {"cmd":"status"}  {"cmd":"stop"}""",
 
 "rules": """Rules = instant reflexes (the recorder applies them in ms, no need for you to watch):

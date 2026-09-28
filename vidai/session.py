@@ -254,6 +254,12 @@ class SessionRecorder:
             if (a.segments_of(kind) or a.events_of(kind)) and kind not in a.selected_stats:
                 a.selected_stats[kind] = "live"
         path = a.save()
+        try:
+            import json as _json
+
+            (Path(s.dir) / "summary.json").write_text(_json.dumps(self.pipe.summary(), ensure_ascii=False, indent=1))
+        except Exception:
+            pass
         from .profile import Profile
 
         prof = Profile()  # remember the answers the user gives every time
@@ -302,7 +308,12 @@ def recover_session(session_dir: str | Path) -> SessionStatus:
     vpart = v.with_name(v.stem + ".part-video.mkv")
     if not v.exists() and vpart.exists():
         try:  # the live pipeline records audio and video separately; join what was written
-            mux_parts(vpart, v.with_name(v.stem + ".part-audio.mka"), v)
+            from .live.bus import read_events as _re
+
+            clips = [(e["data"]["t"], e["data"]["path"], e["data"]["seconds"])  # VidAI's voice, if it talked
+                     for e in _re(Path(s.dir) / "live.jsonl", 0, ["action"], 10 ** 7)
+                     if e["data"].get("what") == "vidai_voice"]
+            mux_parts(vpart, v.with_name(v.stem + ".part-audio.mka"), v, clips)
         except Exception as e:
             s.set_status(state="error", message=f"recovery failed: {e}")
             return s.status

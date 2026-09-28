@@ -240,7 +240,8 @@ def live_wait_request(session: str, since: int = 0, timeout: float = 300) -> dic
         if evs:
             since = evs[-1]["seq"]
         fast += [e["data"] for e in evs if e["kind"] == "action" and e["data"].get("what") == "fast_request"]
-        reqs = [{"request": e["seq"], "t": e["t"], "message": e["data"]["message"]} for e in evs
+        reqs = [{"request": e["seq"], "t": e["t"], "message": e["data"]["message"],
+                 **({"reply": "voice"} if e["data"].get("reply") == "voice" else {})} for e in evs
                 if e["kind"] == "claude" and e["data"].get("message")]
         state = check_session(session).state
         if reqs or state in ("done", "error", "cancelled") or _t.time() >= end:
@@ -248,7 +249,8 @@ def live_wait_request(session: str, since: int = 0, timeout: float = 300) -> dic
                       if e["data"].get("what") in ("processor_added",)]
             return {"state": state, "requests": reqs, "handled_by_vidai": fast, "next": since,
                     "effects_added_so_far": active,
-                    "hint": "answer with ONE live_control/live_effect/live_processor call, then wait again"}
+                    "hint": "answer with ONE live_control/live_effect/live_processor call (reply='voice' -> live_say), "
+                            "then wait again"}
         _t.sleep(0.25)
 
 
@@ -430,6 +432,43 @@ def vidai_forget(kind: str, key: str) -> dict:
         p._save("prefs.json", prefs)
         return {"forgot": ok}
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def live_notify(session: str, text: str, seconds: float = 5.0, done: bool = False) -> dict:
+    """Show the user a short message in the VidAI window (never burned into the video),
+    e.g. "Made your hair bigger — say 'VidAI undo' if you don't like it"."""
+    return live_control(session, [{"cmd": "notify", "text": text, "seconds": seconds, "kind": "claude"}], done=done)
+
+
+def live_ask_user(session: str, question: str, options: list[str] | None = None, timeout: float = 60,
+                  speak: bool = True) -> dict:
+    """Ask the user a question in the VidAI window (buttons) and by voice; returns their answer.
+    Use it to clarify instead of guessing, e.g. question="Which background?", options=["blur", "purple", "beach"]."""
+    import time as _t
+    import uuid
+
+    from .live.bus import read_events
+
+    qid = uuid.uuid4().hex[:8]
+    before = read_events(_live_log(session), 0, None, 1)
+    seq0 = before[-1]["seq"] if before else 0
+    live_control(session, [{"cmd": "question", "id_q": qid, "text": question, "options": options or [],
+                            "speak": speak}], done=False)
+    end = _t.time() + timeout
+    while _t.time() < end:
+        for e in read_events(_live_log(session), seq0, ["answer"], 10 ** 6):
+            if e["data"].get("question") == qid:
+                return {"answer": e["data"]["answer"], "said": e["data"].get("said"), "by": e["data"].get("by")}
+        _t.sleep(0.2)
+    live_control(session, [{"cmd": "cancel_question", "question": qid}], wait=2, done=False)  # don't leave it open
+    return {"answer": None, "timeout": True}
+
+
+def live_say(session: str, text: str, subtitle: bool = False, done: bool = True) -> dict:
+    """VidAI answers out loud (offline voice, mixed cleanly into the video). Use it for requests with
+    reply="voice" (the user said "VidAI talk" and asked a question). Keep answers short: 1-3 sentences.
+    subtitle=True also shows the answer as text at the bottom of the video while it is spoken."""
+    return live_control(session, [{"cmd": "say", "text": text, "subtitle": subtitle}], done=done)
 
 
 def live_status(session: str) -> dict:

@@ -59,6 +59,19 @@ Show the user a 3–5 line summary of the config (what you will track and why).
     only if nothing fits, `live_processor(session, name, code, save_as=...)` (hands/face are in `ctx.tracks`,
     VidAI downloads models itself). Save new effects with `save_as` so next time is instant.
   - No checks before answering; keep chat messages to one line while the user records.
+  - Requests with `reply: "voice"` come from "VidAI talk" (VidAI said "How can I help you?" and the user asked a
+    question): answer OUT LOUD with `live_say(session, "short answer, 1-3 sentences")` — it is spoken with
+    VidAI's voice and mixed cleanly into the video (`subtitle=True` also shows it as text in the video).
+  - Not sure what they mean (which background? how big? which hand)? Don't guess:
+    `live_ask_user(session, "Which background?", ["blur", "purple", "beach"])` shows buttons in the window and
+    asks by voice; it returns the answer ("VidAI, the second one", a click, or typed text all work).
+  - After you do something, tell them in one line in the window (never recorded):
+    `live_notify(session, "Hair made bigger — say 'VidAI undo' to take it back")`.
+  - The user can say "VidAI undo / redo" (a whole request is one step), "VidAI help" (command card),
+    "VidAI lighter" (performance), type in the "Tell VidAI…" box, or hold ctrl+alt+space to talk without the
+    wake word. Requests from typing arrive exactly like voice ones.
+  - If the recorder publishes performance `warning` events, prefer lighter effects; VidAI lowers tracking and
+    preview rates by itself and only turns an effect off as a last resort (and says so).
   - Need to install, download or create something? Never use Bash/Write/curl/pip yourself — ask VidAI:
     `vidai_install(packages, session, reason)`, `vidai_download(url, name, session, reason)`,
     `vidai_create_file(relpath, content, session, reason)`. VidAI says "Master, I need to ..." and waits for

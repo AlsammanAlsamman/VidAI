@@ -48,6 +48,7 @@ class Tracks:
         self.hands_at = self.face_at = -1.0
         self.error: str | None = None
         self.ready = False
+        self.max_hz = 30.0  # lowered by the performance governor
         self._frame = None
         self._lock = threading.Lock()
         self._stop = False
@@ -120,7 +121,12 @@ class Tracks:
 
     def _loop(self, mp, hl, fd) -> None:
         ts = 0
+        last = 0.0
         while not self._stop:
+            wait = 1.0 / self.max_hz - (time.monotonic() - last)
+            if wait > 0:
+                time.sleep(wait)
+            last = time.monotonic()
             with self._lock:
                 img, self._frame = self._frame, None
             if img is None:

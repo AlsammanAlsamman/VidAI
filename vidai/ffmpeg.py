@@ -123,3 +123,23 @@ def read_frames(path: str, fps: float = 2.0, width: int = 160, height: int = 90,
 def extract_frame(path: str, t: float, out_png: str, width: int = 640) -> str:
     run(["-ss", f"{t:.3f}", "-i", path, "-frames:v", "1", "-vf", f"scale={width}:-2", out_png])
     return out_png
+
+
+@lru_cache(maxsize=1)
+def hw_encoder() -> list[str] | None:
+    """Intel/AMD GPU H.264 encoding (VAAPI) when this ffmpeg supports it and a render device exists.
+    The bundled static ffmpeg does not; a system ffmpeg (`sudo apt install ffmpeg`) usually does."""
+    import os as _os
+
+    dev = "/dev/dri/renderD128"
+    if not _os.path.exists(dev):
+        return None
+    out = subprocess.run([ffmpeg_exe(), "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    if "h264_vaapi" not in out:
+        return None
+    probe = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-vaapi_device", dev, "-f", "lavfi",
+                            "-i", "color=s=320x240:d=0.2", "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+                            "-f", "null", "-"], capture_output=True)
+    if probe.returncode != 0:
+        return None
+    return ["-vaapi_device", dev, "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-qp", "21"]
