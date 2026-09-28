@@ -30,7 +30,7 @@ const steps = [
   { n: 3, title: "RECORD", who: "VidAI Recorder", kind: "vidai", file: "video.mkv",
     lines: ["camera · screen · camera-in-screen", "mic · hotkeys · voice", "“VidAI record” / “VidAI stop”"] },
   { n: 4, title: "LIVE", who: "VidAI · every frame", kind: "live", file: "live.jsonl",
-    lines: ["stats: sound · speech-to-text · OCR", "effects · rules · voice commands", "instant models · 30 fps"] },
+    lines: ["effects by voice · picture tools", "AI models · talk · suggest", "stats: speech · OCR · 30 fps"] },
   { n: 5, title: "ANCHORS", who: "VidAI", kind: "vidai", file: "anchors.json",
     lines: ["pauses · speech + transcript", "markers · screen text", "what was applied live"] },
   { n: 6, title: "UNDERSTAND", who: "Claude", kind: "claude", file: "frames.png",
@@ -125,7 +125,7 @@ svg += text(W / 2, 124, "say “vidai” → Claude interviews you → you recor
 svg += `<g transform="translate(${W - 150},62) rotate(8)">
   <rect x="-118" y="-24" width="236" height="48" rx="12" fill="${C.live}" fill-opacity="0.12" stroke="${C.live}" stroke-width="2.5" stroke-dasharray="7 5"/>
   ${text(0, -2, "UNDER DEVELOPMENT", { size: 16, weight: 800, fill: C.live, anchor: "middle", spacing: 1 })}
-  ${text(0, 16, "v0.2 · working prototype", { size: 11.5, fill: C.live, anchor: "middle", weight: 600 })}
+  ${text(0, 16, "v0.4 · working prototype", { size: 11.5, fill: C.live, anchor: "middle", weight: 600 })}
 </g>`;
 
 // recording bracket (behind cards 3-5)
@@ -188,7 +188,7 @@ steps.forEach((s) => { svg += card(s); });
 }
 
 // footer
-svg += text(W / 2, H - 46, "free & local · Linux · camera + screen + mic · voice in English · 50 tests passing · more features coming",
+svg += text(W / 2, H - 46, "free & local · Linux · camera + screen + mic · 🤗 small AI models · VidAI talks · 104 tests passing · more coming",
   { size: 13, fill: C.muted, anchor: "middle" });
 svg += text(W / 2, H - 22, "cd VidAI && claude   →   vidai", { size: 12, fill: C.line, anchor: "middle", mono: true });
 svg += `</svg>`;

@@ -1,104 +1,271 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/AlsammanAlsamman/VidAI/master/assets/icon.png" alt="VidAI" width="260">
+  <img src="https://raw.githubusercontent.com/AlsammanAlsamman/VidAI/master/assets/icon.png" alt="VidAI" width="240">
 </p>
 
 <h1 align="center">VidAI</h1>
 
-<p align="center"><b>Record, understand and improve your videos — by talking to Claude.</b></p>
+<p align="center">
+  <b>The video studio you talk to.</b><br>
+  Record · add effects live by voice · let Claude edit — local, free, open source.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/status-under%20development-ff3b5c?style=for-the-badge" alt="status: under development">
+  <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec&style=for-the-badge" alt="PyPI vidai-rec"></a>
+  <img src="https://img.shields.io/badge/tests-104%20passing-34d399?style=for-the-badge" alt="104 tests passing">
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.10%2B-5b8cff" alt="python 3.10+">
+  <img src="https://img.shields.io/badge/platform-Linux-ffbf00" alt="Linux">
+  <img src="https://img.shields.io/badge/runs-100%25%20local-34d399" alt="runs locally">
+  <img src="https://img.shields.io/badge/works%20with-Claude%20Code-8b6cff" alt="Claude Code">
+  <img src="https://img.shields.io/badge/models-%F0%9F%A4%97%20Hugging%20Face%20%C2%B7%20MediaPipe-ff9500" alt="Hugging Face and MediaPipe models">
+</p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/AlsammanAlsamman/VidAI/master/assets/banner.jpg" alt="A YouTuber records while VidAI robots run the camera, bring a new wig on request and paint a new background live" width="100%">
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/status-under%20development-ff3b5c" alt="status: under development">
-  <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec" alt="PyPI vidai-rec"></a>
-  <img src="https://img.shields.io/badge/python-3.10%2B-34d399" alt="python 3.10+">
-  <img src="https://img.shields.io/badge/platform-Linux-ffbf00" alt="Linux">
-  <img src="https://img.shields.io/badge/tests-104%20passing-34d399" alt="61 tests passing">
-</p>
+> **You:** *"VidAI, fix the light."* → your dark room is lit, instantly.<br>
+> **You:** *"VidAI, a beach behind me."* → you're cut out and standing on a beach.<br>
+> **You:** *"VidAI talk."* — **VidAI:** *"How can I help you?"* — **You:** *"What is BLAST?"* → Claude answers **out loud, in the video**.<br>
+> **You:** *"VidAI, suggest."* → ideas previewed live: *confirm · next · cancel*.
 
 > [!WARNING]
 > **VidAI is under active development.** It works end to end today (record → live effects → edit → YouTube
 > export), but features, commands and file formats may still change.
 
-VidAI is a **video plugin for Claude Code**. Say `vidai`, answer a few questions, and record. While you record,
-VidAI measures small, useful statistics ("anchors") and applies live effects; you can talk to it
-(*"VidAI, zoom in"*, *"VidAI, add a title that says Hello"*). Afterwards Claude uses the anchors to edit the
-video and exports a YouTube-ready file. Everything runs locally and for free.
+---
+
+## Contents
+
+[Highlights](#-highlights) · [How it works](#-how-it-works) · [Say this](#%EF%B8%8F-say-this) · [AI model hub](#-ai-model-hub) · [All features](#-all-features) · [Quick start](#-quick-start) · [For Claude](#-for-claude) · [Privacy](#-privacy--licenses) · [Roadmap](#%EF%B8%8F-roadmap)
 
 ---
 
-## How it works
+## ✨ Highlights
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 🎥 Its own recorder
+Camera, screen, or camera-in-screen, with mic. Live preview, countdown, crash-safe files, 30 fps at 1080p.
+
+</td>
+<td width="33%" valign="top">
+
+### 🪄 Live effects by voice
+Stickers that follow your hands and head, pop-out eyes, text, zoom, captions, backgrounds, light and colour — **instant**, no editing needed.
+
+</td>
+<td width="33%" valign="top">
+
+### 🗣️ Talk to it
+*"VidAI …"*, push-to-talk, or type. It asks when unsure, answers **out loud**, and suggests ideas you can preview.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🤗 Small AI models, not code
+Emotion, hand gestures, anime and painting looks, matting — VidAI downloads open models (with your OK) and applies them.
+
+</td>
+<td valign="top">
+
+### 🌱 Learns you
+Remembers words it misheard, your favourite sizes and effects, turns Claude's solutions into instant shortcuts.
+
+</td>
+<td valign="top">
+
+### 📺 YouTube-ready
+Claude cuts pauses and mistakes, adds titles, chapters, subtitles, fixes audio, and exports MP4 + `.srt` + description.
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🔄 How it works
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/AlsammanAlsamman/VidAI/master/assets/flowchart/vidai_flow.svg"><img src="https://raw.githubusercontent.com/AlsammanAlsamman/VidAI/master/assets/flowchart/vidai_flow.png" alt="VidAI flow: brief, anchor setup, record, live, anchors, understand, edit plan, render" width="100%"></a>
 </p>
 
-<sub>Generated by <code>assets/flowchart/flowchart.js</code> (pure Node → SVG → PNG via headless Chrome): <code>node assets/flowchart/flowchart.js</code></sub>
+1. **Brief** — say `vidai` in Claude Code; Claude asks what the video is about (and remembers your usual answers).
+2. **Anchors** — Claude picks the few small stats worth recording (pauses, speech, screen text, markers…).
+3. **Record** — the VidAI Recorder opens; everything live happens in a fast loop (30 fps), while Claude listens in a slow loop for requests it has to think about.
+4. **Edit** — Claude reads the anchors, looks only where they point, builds a non-destructive edit plan and renders it in parallel.
+
+<sub>Flowchart generated by <code>assets/flowchart/flowchart.js</code> (pure Node → SVG → PNG).</sub>
 
 ---
 
-## What it can do now
+## 🗣️ Say this
 
-| | |
+Every command starts with **"VidAI …"** (or hold **ctrl+alt+space**, or type in the *Tell VidAI…* box).
+Everything in this table is **instant** — VidAI understands it by itself, no waiting for Claude.
+
+| Say | What happens |
 |---|---|
-| 🎙️ **Brief** | Claude asks what the video is about, the language, style, length and sections, then decides what to track |
-| 🎥 **Record** | Its own recorder: camera, screen, or screen + camera, with mic · live preview · countdown · crash-safe files |
-| 📊 **Live anchors** | Pauses, speech (speech-to-text), text on screen (OCR), motion, scene changes, active window, markers |
-| 🗣️ **Voice** | *“VidAI record / stop / mark / mistake / new section … / important / zoom in / zoom out / captions on”* — anything else goes to Claude (English for now) |
-| ✨ **Live effects** | Text, logos, arrows and boxes, zoom, blur, live captions — plus new effects Claude writes on the spot (e.g. an object that follows your hand) |
-| 💬 **Talk or type** | Say *“VidAI …”*, hold **ctrl+alt+space** to talk without the wake word, or type in the *Tell VidAI…* box · *“VidAI help”* shows every command |
-| 🎨 **Picture tools** | *“Fix the light”* (auto exposure for dark rooms), brighter / darker, contrast, colourful, black and white, warmer / cooler, sharper — one fast C pass, instant by voice |
-| 🧑‍🎤 **Better cut-out** | Background removal with a real matting model (soft edges, hands and hair kept): blur, colour, photo (*“beach behind me”*) or a moving background |
-| 🤗 **Model hub** | Small open models instead of code: emotion from your face, hand gestures (👍 ✌️ ✋ as triggers), anime and painting styles — VidAI asks, downloads (Hugging Face / MediaPipe) and applies them; *colours like this photo* is learned in milliseconds |
-| 💡 **Suggestions** | *“VidAI suggest”* previews ideas live that fit the moment (dark room → fix the light first) — say *confirm*, *next* or *cancel*; it learns what you like |
-| 🗣️ **VidAI talks** | Say *“VidAI talk”* → *“How can I help you?”* → ask anything; Claude answers in VidAI's own voice (offline, natural), mixed cleanly into the video |
-| ↶ **Undo / redo** | *“VidAI undo”* takes back a whole request (even one that changed several effects), *“VidAI redo”* brings it back |
-| 🙋 **Claude asks you** | When a request is unclear, Claude asks in the window with buttons (*“Which background? blur · purple · beach”*) and tells you what it did — messages that are never recorded |
-| 🏎️ **Stays smooth** | A performance governor keeps 30 fps: it slows tracking and preview first, warns you, and only then turns off the heaviest effect |
-| 🤔 **Thinking icon** | A little animated VidAI eye bounces in the corner while Claude works on your request |
-| 🧠 **Instant models** | Teach it something during the recording (*“VidAI label yes”*), correct it (*“VidAI wrong”*); it learns immediately |
-| ✂️ **Editing** | Remove pauses and failed takes, add titles, arrows, zooms, subtitles, chapters, audio clean-up — without touching the original |
-| 🌱 **Learns you** | Remembers misheard phrases you corrected, turns Claude's solutions into instant shortcuts, keeps your sizes and hand choices, and reads its lessons before every new video |
-| 🔐 **Asks first** | *“Master, I need to install … Say VidAI confirm”* — or say *“VidAI, take all actions”* for full access |
-| ⚡ **Fast** | Renders in parallel chunks split inside silences; hot loops in C |
-| 📺 **YouTube export** | MP4 + subtitles (`.srt`) + a description with chapters |
+| **record** · **stop** · **help** | start / stop recording · a card with every command |
+| **fix the light** · **brighter** · **darker** | automatic exposure for dark rooms · manual light |
+| **more contrast** · **more colourful** · **black and white** · **warmer** · **cooler** · **sharper** · **normal colours** | picture tools (one fast C pass) |
+| **blur the background** · **beach behind me** · **purple background** · **moving background** | background replacement with soft, clean edges |
+| **add an apple in my hand** · **orange on my other hand** · **crown on my head** · **sunglasses on me** | ~100 emoji stickers that follow your hands, head, eyes, face |
+| **make my eyes pop** · **text above my head saying …** | cartoon eyes · a floating title |
+| **show my emotion** · **detect my gestures** | 😄😮😢 above your head · 👍✌️✋ as triggers |
+| **make it look like a painting** · **candy style** · **make me anime** | AI art styles (slow live, full quality when editing) |
+| **bigger** · **smaller** · **swap hands** · **remove the apple** · **back to normal** | adjust or remove effects |
+| **undo** · **redo** | take back / bring back a whole request |
+| **suggest** → **confirm** · **next** · **cancel** | ideas previewed live; it learns what you like |
+| **talk** → *your question* | VidAI answers out loud, in the video |
+| **mark** · **mistake** · **new section …** · **important** | markers for editing (chapters, cut failed takes) |
+| **take all actions** · **ask me first** · **confirm** · **deny** | permissions for downloads and installs |
+| *anything else* | goes to **Claude** — the bouncing VidAI eye shows while it works |
 
 ---
 
-## Quick start
+## 🤗 AI model hub
+
+VidAI prefers **small open models** over writing new code. It asks *"Master, I need to download the Emotion model (35 MB, Apache-2.0)"*, downloads it in the background, applies it, and writes the credit to `CREDITS.txt`.
+
+| Model | Source | Size | What it does | Live |
+|---|---|---|---|---|
+| Emotion (FER+) | ONNX model zoo | 35 MB | your expression → a live stat + emoji | ✅ 40 ms |
+| Hand gestures | MediaPipe | 8 MB | 👍 👎 ✌️ ✋ ☝️ ✊ 🤟 as triggers for rules | ✅ ~12 ms |
+| Robust Video Matting | RVM | 15 MB | soft cut-out that keeps hands and hair | ✅ 15 Hz |
+| Hands · face | MediaPipe | 8 MB | stickers and effects that follow you | ✅ |
+| Painting styles ×5 | ONNX model zoo | 6.7 MB | mosaic, candy, cubist, rain, pointillism | ⚠️ a few/s |
+| Anime (AnimeGANv2) | Hugging Face | 8.6 MB | anime look | ⚠️ ~1/s |
+| Colours like a photo | trained in ms | — | copies a photo's colour grade | ✅ |
+| Speech (Whisper tiny.en) · Voice (Piper) | open source | 75 · 63 MB | voice commands · VidAI's own voice | ✅ |
+
+Nothing fits? Claude searches Hugging Face (`model_search(..., online=True)`) and wraps a new model in a small adapter — saved to your library for next time.
+
+---
+
+## 📚 All features
+
+<details>
+<summary><b>🎥 Recording & anchors</b></summary>
+
+- Own recorder (ffmpeg): camera, screen, camera-in-screen; mic via PipeWire; 1080p30; crash-safe files and automatic recovery
+- A brief before recording; Claude chooses the anchors (small stats) for this video
+- Live anchors: pauses, speech + transcript (Whisper), on-screen text (OCR), motion, scene changes, active window, markers
+- Performance governor keeps 30 fps: lowers tracking/preview rates first, warns, and only then turns off the heaviest effect
+</details>
+
+<details>
+<summary><b>🪄 Live effects & picture tools</b></summary>
+
+- Stickers on hands, fingers, head, face, eyes, nose, mouth — ~100 emoji words, any image, or text
+- Pop-out eyes, floating titles, arrows and boxes, zoom, blur regions, live captions, walking characters, a ball you hit with your hand, a cat that plays with you
+- Picture: auto light, brightness, contrast, saturation, warmth, sharpness — one C pass
+- Backgrounds: blur, colour, photo, animated — Robust Video Matting
+- Effects set up in preview carry into the recording; undo / redo for whole requests
+</details>
+
+<details>
+<summary><b>🗣️ Talking with VidAI and Claude</b></summary>
+
+- Voice ("VidAI …", pause-tolerant), push-to-talk, typing; English for now
+- VidAI never hears itself (mic ignored while it speaks, on the audio clock)
+- Claude asks with buttons when unsure, sends messages that are never recorded, and shows a bouncing "thinking" eye
+- "VidAI talk": questions answered out loud with an offline neural voice, mixed cleanly into the video (mic ducked)
+- "VidAI suggest": context-aware ideas previewed live — confirm / next / cancel
+</details>
+
+<details>
+<summary><b>🌱 Learning & memory</b></summary>
+
+- Corrections you make teach it what you meant ("reminds the apple" → "remove the apple")
+- Claude's solutions you keep become instant shortcuts (only self-contained ones)
+- Your sizes, hands, backgrounds and brief answers become defaults; suggestions you like rank higher
+- Lessons from mistakes are read by Claude before every video
+</details>
+
+<details>
+<summary><b>🔐 Permissions</b></summary>
+
+- VidAI installs, downloads and creates files itself — no Claude Code prompts
+- Ask mode: *"Master, I need to …"* → *"VidAI confirm"*; full access: *"VidAI, take all actions"*
+- Installs only into VidAI's own environment, files only under `~/.vidai` and your session folders; everything logged in `~/.vidai/actions.log`
+</details>
+
+<details>
+<summary><b>✂️ Editing & export</b></summary>
+
+- Non-destructive edit plan: cuts, pauses, failed takes, titles, icons, arrows, zooms, subtitles, chapters, audio clean-up, lab models
+- Parallel render split inside silences; hot loops in C
+- YouTube export: MP4 (H.264/AAC, faststart, chapters) + `.srt` + title/description with chapters
+</details>
+
+---
+
+## 🚀 Quick start
 
 ```bash
 pip install vidai-rec
+vidai setup            # downloads the speech, hand and face models once
 ```
 
-Working on VidAI itself (tests, Claude Code skill and MCP config included):
+Then, in Claude Code:
 
 ```bash
-git clone https://github.com/AlsammanAlsamman/VidAI && cd VidAI
-python3 -m venv .venv && .venv/bin/pip install -e ".[all]"
-.venv/bin/python -m pytest -q        # optional: run the tests
-```
-
-Then open Claude Code inside the folder and say **vidai**:
-
-```bash
-claude
+cd your-project && claude
 > vidai
 ```
 
 Claude interviews you, opens the **VidAI Recorder**, and edits the video when you are done.
 Prefer the terminal? `vidai studio` · `vidai analyze video.mkv` · `vidai plan video.mkv remove_gaps` · `vidai render video.mkv`
 
-**Requirements:** Linux (X11), a webcam and mic (PipeWire/PulseAudio), `gcc` for the C speed-ups (optional).
-ffmpeg is bundled; the speech model downloads on first use.
+<details>
+<summary>Working on VidAI itself</summary>
+
+```bash
+git clone https://github.com/AlsammanAlsamman/VidAI && cd VidAI
+python3 -m venv .venv && .venv/bin/pip install -e ".[all]"
+.venv/bin/python -m pytest -q        # 104 tests
+node assets/flowchart/flowchart.js   # rebuild the flowchart
+```
+</details>
+
+**Requirements:** Linux (X11), webcam and mic (PipeWire/PulseAudio), Python 3.10+. Optional: `gcc` for the C speed-ups.
+ffmpeg is bundled; models download on first use.
 
 ---
 
-## Coming next
+## 🧩 For Claude
+
+VidAI is a Claude Code plugin: an MCP server with **43 tools** plus a skill that teaches the workflow.
+
+| Area | Tools |
+|---|---|
+| Brief & recording | `brief_questions`, `studio_start`, `studio_wait`, `studio_status`, `studio_recover` |
+| Live | `live_wait_request`, `live_control`, `live_effect`, `live_processor`, `live_say`, `live_ask_user`, `live_notify`, `live_stats` |
+| Models | `model_search`, `model_apply`, `color_from_photo`, `train`, `classify_video` |
+| Permissions & memory | `vidai_install`, `vidai_download`, `vidai_create_file`, `vidai_permissions`, `vidai_profile`, `vidai_learn`, `vidai_forget` |
+| Editing | `analyze_video`, `anchors`, `frame`, `contact_sheet`, `plan`, `render_video` |
+
+---
+
+## 🔒 Privacy & licenses
+
+- Everything runs **on your computer**: recording, speech-to-text, effects, models. Nothing is uploaded.
+- Downloaded models and photos are credited in each session's `CREDITS.txt` with their licenses.
+- Actions VidAI takes on its own (installs, downloads, files) are logged in `~/.vidai/actions.log`.
+
+---
+
+## 🗺️ Roadmap
 
 - Speech-based editing: remove filler words, keep the best take automatically
-- Built-in tracking: hands, face, objects — effects that follow them
-- Arabic voice commands and on-screen text
-- More layouts, transitions and music
+- More hub models: body pose, 106-point face landmarks, depth "portrait mode", on-screen text blur for screencasts
+- Full-quality AI styles applied at edit time
+- Arabic voice commands and an Arabic voice for "VidAI talk"
+- Windows / macOS
