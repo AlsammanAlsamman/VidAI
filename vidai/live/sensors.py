@@ -137,7 +137,13 @@ class MotionSensor:
 WAKE = ["vidai", "vid ai", "video ai", "vid-ai", "vidia", "vidi", "veedai", "fidai", "فيداي", "في داي", "فيدي", "فيديو اي"]
 
 COMMANDS: list[tuple[str, list[str]]] = [  # (command, trigger phrases) — English + Arabic
-    ("record", ["start recording", "record", "start", "go", "ابدأ التسجيل", "ابدأ", "سجل"]),
+    ("record", ["start recording", "record", "start", "ابدأ التسجيل", "ابدأ", "سجل"]),
+    ("full_access", ["take all actions", "take all the actions", "full access", "you have my permission",
+                     "do everything", "all permissions", "you have full access"]),
+    ("ask_first", ["ask me first", "ask first", "ask permission", "ask for permission"]),
+    ("confirm", ["confirm", "confirmed", "yes", "yes please", "go ahead", "do it", "approve", "approved", "allow",
+                 "okay", "ok"]),
+    ("deny", ["deny", "denied", "no", "no thanks", "cancel", "don't", "do not", "reject"]),
     ("stop", ["stop recording", "stop", "إيقاف", "توقف"]),
     ("mistake", ["mistake", "cut that", "again", "redo", "خطأ", "غلط", "إعادة"]),
     ("section", ["new section", "section", "chapter", "قسم جديد", "قسم", "فصل"]),
@@ -218,6 +224,7 @@ class SpeechToText:
         self.model = None
         self.enabled = True
         self.transcripts: list[dict] = []
+        self.profile = None  # vidai.profile.Profile: user's words (recognition) and learned corrections
         self.armed_until = -1.0  # after a bare "VidAI", the next utterance within a few seconds is the command
         self.arm_seconds = 5.0
         self.min_speech = 0.35
@@ -263,6 +270,8 @@ class SpeechToText:
                     lang = max(self.allowed, key=lambda l: p.get(l, 0.0))
                 # bias decoding toward the wake word, otherwise "VidAI" comes out as "VidI" / "We die"
                 hot = "VidAI فيداي" if lang in (None, "ar") else "VidAI"  # noqa: RUF001
+                if self.profile is not None:
+                    hot = hot.replace("VidAI", self.profile.hotwords())
                 segs, info = self.model.transcribe(samples, language=lang, beam_size=1, vad_filter=True,
                                                    condition_on_previous_text=False, hotwords=hot)
                 kept = [x.text.strip() for x in segs
@@ -279,6 +288,8 @@ class SpeechToText:
         'VidAI' <pause> 'zoom in' as one command)."""
         if not text or re.fullmatch(r"[\W_]*", text) or is_hallucination(text):
             return
+        if getattr(self, "profile", None) is not None:
+            text = self.profile.correct(text)
         cmd = parse_command(text, self.wake_words)
         if cmd and cmd["command"] == "claude" and not cmd["args"]:  # just "VidAI": listen for the command
             self.armed_until = end + self.arm_seconds

@@ -15,7 +15,7 @@
   <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec" alt="PyPI vidai-rec"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-34d399" alt="python 3.10+">
   <img src="https://img.shields.io/badge/platform-Linux-ffbf00" alt="Linux">
-  <img src="https://img.shields.io/badge/tests-50%20passing-34d399" alt="50 tests passing">
+  <img src="https://img.shields.io/badge/tests-66%20passing-34d399" alt="61 tests passing">
 </p>
 
 > [!WARNING]
@@ -51,6 +51,8 @@ video and exports a YouTube-ready file. Everything runs locally and for free.
 | 🤔 **Thinking icon** | A little animated VidAI eye bounces in the corner while Claude works on your request |
 | 🧠 **Instant models** | Teach it something during the recording (*“VidAI label yes”*), correct it (*“VidAI wrong”*); it learns immediately |
 | ✂️ **Editing** | Remove pauses and failed takes, add titles, arrows, zooms, subtitles, chapters, audio clean-up — without touching the original |
+| 🌱 **Learns you** | Remembers misheard phrases you corrected, turns Claude's solutions into instant shortcuts, keeps your sizes and hand choices, and reads its lessons before every new video |
+| 🔐 **Asks first** | *“Master, I need to install … Say VidAI confirm”* — or say *“VidAI, take all actions”* for full access |
 | ⚡ **Fast** | Renders in parallel chunks split inside silences; hot loops in C |
 | 📺 **YouTube export** | MP4 + subtitles (`.srt`) + a description with chapters |
 

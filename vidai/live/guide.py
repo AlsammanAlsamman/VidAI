@@ -30,7 +30,11 @@ captions on/off | learn <name> | label <value> | wrong | stop | anything else ->
 {"cmd":"shape","shape":"arrow|circle|box","x":.5,"y":.5,"w":.15,"h":.15,"angle":225,"color":"#FF3B30","for":3}
 {"cmd":"image","path":"/abs/logo.png","position":"top-right","width":.12}
 {"cmd":"zoom","x":.25,"y":.25,"w":.5,"h":.5,"for":6}          {"cmd":"blur","x":0,"y":.9,"w":.4,"h":.1}
-{"cmd":"add","name":"captions","type":"captions"}  types: text shape image zoom blur captions model
+{"cmd":"add","name":"captions","type":"captions"}  types: text shape image zoom blur captions model attach big_eyes
+{"cmd":"add","name":"fx_crown","type":"attach","params":{"what":"👑","to":"head","scale":1.0}}
+   attach to: hand right_hand left_hand other_hand finger head above_head face eyes nose mouth screen
+   what: any emoji, a word ("apple","horns","sunglasses"...), or an image path
+{"cmd":"add","name":"fx_big_eyes","type":"big_eyes","params":{"zoom":1.8}}
 {"cmd":"add","name":"x","file":"/abs/path.py","params":{...}}  (your own processor file)
 {"cmd":"set","name":"x","params":{...}}  {"cmd":"enable","name":"x","for":5}  {"cmd":"disable","name":"x"}
 {"cmd":"remove","name":"x"}
@@ -63,12 +67,24 @@ class Vignette(LiveProcessor):
     def on_event(self, ev, ctx): ...
     def process(self, frame, t, ctx):   # frame: HxWx3 uint8 RGB (1920x1080 by default); return a frame
         ...
+Hands and face: set `tracking = True` on the class, then read ctx.tracks.hand("Right"|"Left"|"any") -> palm,
+size, tip, points and ctx.tracks.face_now() -> box, eyes, nose, mouth, top (all normalized 0..1). VidAI runs
+and downloads the trackers itself. Save your effect with live_processor(..., save_as="name") for reuse.
 Rules: budget ~8 ms per frame (set budget_ms if you need more); no Python loops over pixels — use NumPy,
 OpenCV (cv2) and vidai.native (alpha_blend, affine_color, frame_mad, rms_db). Cache anything expensive
 (ctx.overlay(op) caches rendered text/shape/image overlays). ctx.stats = latest value of every stat,
 ctx.bus.publish(kind, data) to emit your own stats (other rules can react to them).
 A processor that raises or is too slow is disabled automatically and you get an `error` event with the reason:
 read it, fix the code, call live_processor again (same name replaces it).""",
+
+"permissions": """Installing, downloading, creating files: VidAI does it itself (no Claude Code prompts).
+vidai_install(["rembg"], session, reason="remove the background") / vidai_download(url, name, session, reason) /
+vidai_create_file(relpath, content, session, reason).
+- ask mode (default): VidAI says "Master, I need to install rembg to remove the background. Say VidAI confirm,
+  or VidAI deny." and shows Confirm / Deny in the window; the call returns done / denied / no_answer.
+- full mode: the user said "VidAI, take all actions" -> runs at once ("VidAI, ask me first" switches back).
+Installs go only into VidAI's own Python; files only under ~/.vidai or the session; all logged in
+~/.vidai/actions.log.""",
 
 "models": """Instant models (learned and corrected during the recording, k-NN on tiny frame features):
 1. {"cmd":"learn","name":"whiteboard","labels":["yes","no"],"region":null}

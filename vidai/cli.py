@@ -31,6 +31,9 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("devices", help="list cameras, screen and mic capture method")
 
+    s = sub.add_parser("setup", help="download all models once (speech, hands, face)")
+    s.add_argument("--whisper", nargs="*", default=["base"])
+
     s = sub.add_parser("recover", help="repair a session whose recorder window died")
     s.add_argument("session")
 
@@ -115,6 +118,10 @@ def main(argv: list[str] | None = None) -> None:
             _print(service.studio_wait(res["session"], timeout=6 * 3600))
     elif a.cmd == "recover":
         _print(service.studio_recover(a.session))
+    elif a.cmd == "setup":
+        from .models_dl import setup
+
+        _print(setup(tuple(a.whisper)))
     elif a.cmd == "devices":
         _print(service.studio_devices())
     elif a.cmd == "record":

@@ -62,6 +62,11 @@ class RecorderApp:
         self.preview: LivePipeline | None = None
         self.live_text = ""
         self.live_color = MUTED
+        self.ask: tuple[str, str] | None = None  # (request id, text) waiting for Confirm / Deny
+        self._ask_shown = False
+        from . import actions
+
+        self.full_access = actions.get_mode(session.dir) == "full"
         self.rec: SessionRecorder | None = None
         self.state = "idle"  # idle | countdown | recording | saving | done
         self.count = 0
@@ -199,6 +204,21 @@ class RecorderApp:
                                    font=self._font(11), text_color=MUTED, anchor="w", justify="left",
                                    wraplength=PREVIEW_W)
         self.status.pack(fill="x", pady=(4, 12), **pad)
+        self._pad = pad
+        self.ask_bar = ctk.CTkFrame(r, fg_color=CARD_2, corner_radius=12)
+        self.ask_label = ctk.CTkLabel(self.ask_bar, text="", font=self._font(12, "bold"), text_color=WARN,
+                                      anchor="w", justify="left", wraplength=PREVIEW_W - 190)
+        self.ask_label.pack(side="left", padx=10, pady=6, fill="x", expand=True)
+        ctk.CTkButton(self.ask_bar, text="✕ Deny (n)", width=80, height=28, fg_color=CARD, hover_color=LINE,
+                      border_width=1, border_color=REC, text_color=TEXT, font=self._font(11),
+                      command=lambda: self._answer("deny")).pack(side="right", padx=(4, 8))
+        ctk.CTkButton(self.ask_bar, text="✓ Confirm (y)", width=96, height=28, fg_color=OK, hover_color="#2bb886",
+                      text_color=BG, font=self._font(11, "bold"),
+                      command=lambda: self._answer("confirm")).pack(side="right", padx=4)
+        self.root.bind("y", lambda e: self._answer("confirm"))
+        self.root.bind("Y", lambda e: self._answer("confirm"))
+        self.root.bind("n", lambda e: self._answer("deny"))
+        self.root.bind("N", lambda e: self._answer("deny"))
         self.marks_log: list[str] = []
 
     # ---------- preview drawing ----------
@@ -259,7 +279,8 @@ class RecorderApp:
             self.preview = LivePipeline(cfg, live, None, session_dir=self.session.dir, on_frame=self._on_frame,
                                         on_start_request=self._start_requested.set,
                                         on_stop_request=lambda: None)
-            self.preview.bus.subscribe(self._on_live, {"transcript", "voice_command", "claude", "error", "action"})
+            self.preview.bus.subscribe(self._on_live, {"transcript", "voice_command", "claude", "error", "action",
+                                                       "permission", "permission_mode"})
             self.preview.start()
         except Exception as e:
             self.preview = None
@@ -317,7 +338,7 @@ class RecorderApp:
             return
         self.state = "recording"
         self.rec.pipe.bus.subscribe(self._on_live, {"transcript", "voice_command", "claude", "error", "learner",
-                                                    "screen_text", "action"})
+                                                    "screen_text", "action", "permission", "permission_mode"})
         self.rec_btn.configure(state="normal", text="■", fg_color=CARD_2, hover_color=LINE, border_color=REC)
         self.rec_caption.configure(text="Stop  ·  space  ·  ctrl+alt+s")
         for btn, color in self.mark_btns:
@@ -330,6 +351,23 @@ class RecorderApp:
     def _on_live(self, ev: dict) -> None:
         """Bus thread: only store text; the Tk loop displays it."""
         d, k = ev["data"], ev["kind"]
+        if k == "action" and d.get("what") == "asking":
+            self.ask = (d["request"], d["text"])
+            return
+        if k == "permission":
+            if self.ask and self.ask[0] == d.get("request"):
+                self.ask = None
+            ok = d.get("state") == "approved"
+            self.live_text, self.live_color = (f"✓ allowed: {d.get('text', '')}"[:90] if ok
+                                               else f"✕ denied: {d.get('text', '')}"[:90]), (OK if ok else REC)
+            return
+        if k == "permission_mode":
+            self.full_access = d.get("mode") == "full"
+            if self.full_access:
+                self.ask = None
+            self.live_text, self.live_color = ("FULL ACCESS: VidAI takes all actions" if self.full_access
+                                               else "VidAI will ask you first"), WARN
+            return
         if k == "transcript" and not d.get("is_command"):
             self.live_text, self.live_color = f"› {d['text'][:90]}", MUTED
         elif k == "voice_command":
@@ -342,6 +380,14 @@ class RecorderApp:
             self.live_text, self.live_color = f"! {d.get('where', d.get('processor', ''))}: {str(d.get('error'))[:80]}", REC
         elif k == "action" and d.get("what") in ("processor_added", "text", "zoom", "shape", "image", "blur"):
             self.live_text, self.live_color = f"live: {d['what']} {d.get('name', '')}", OK
+        elif k == "action" and d.get("what") == "learned":
+            txt = {"vocabulary": f"learned: “{d.get('heard')}” means “{d.get('meant')}”",
+                   "macro": f"learned: “{d.get('request')}” is instant next time",
+                   "mistake": f"noted: “{d.get('request')}” went wrong",
+                   "preference": "learned your hand preference"}.get(d.get("kind"), "learned something")
+            self.live_text, self.live_color = txt[:95], ACCENT
+        elif k == "action" and d.get("what") == "corrected":
+            self.live_text, self.live_color = f"heard “{d['heard']}” → “{d['meant']}”"[:95], ACCENT_2
         elif k == "action" and d.get("what") == "listening_request":
             self.live_text, self.live_color = f"→ Claude (keep talking…): {d.get('so_far', '')[:70]}", ACCENT_2
         elif k == "action" and d.get("what") == "listening":
@@ -349,6 +395,13 @@ class RecorderApp:
         elif k == "action" and d.get("what") == "stt_ready":
             self.live_text, self.live_color = ("voice ready: say “VidAI record” to start" if self.state == "idle"
                                                else "voice ready: say “VidAI …” (mark, new section, zoom in, stop)"), OK
+
+    def _answer(self, what: str) -> None:
+        if not self.ask:
+            return
+        pipe = self.rec.pipe if (self.rec and self.state == "recording") else self.preview
+        if pipe:
+            pipe.command({"cmd": what, "request": self.ask[0], "by": "button"}, source="gui")
 
     def mark(self, kind: str) -> None:
         if self.state != "recording" or not self.rec:
@@ -462,10 +515,21 @@ class RecorderApp:
             self.preview = None
         if self.state == "recording" and self.rec:
             t = int(self.rec.elapsed)
-            self._set_pill(f"●  REC {t // 60:02d}:{t % 60:02d}", REC)
+            self._set_pill(f"●  REC {t // 60:02d}:{t % 60:02d}" + ("  ·  FULL" if self.full_access else ""), REC)
             if self.rec.cap and not self.rec.cap.running:
                 self.set_status(f"Capture stopped unexpectedly: {self.rec.cap.error or ''}", REC)
                 self.stop()
+        if self.ask and not self._ask_shown:  # swap the status line for the Confirm / Deny bar
+            self.status.pack_forget()
+            self.ask_label.configure(text=f"{self.session.live.address}, I need to {self.ask[1]}")
+            self.ask_bar.pack(fill="x", pady=(4, 12), **self._pad)
+            self._ask_shown = True
+        elif not self.ask and self._ask_shown:
+            self.ask_bar.pack_forget()
+            self.status.pack(fill="x", pady=(4, 12), **self._pad)
+            self._ask_shown = False
+        if self.full_access and self.state == "idle":
+            self._set_pill("●  READY · FULL ACCESS", WARN)
         if self.live_text and self.state in ("idle", "recording"):
             self.set_status(self.live_text, self.live_color)
             self.live_text = ""

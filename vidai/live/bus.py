@@ -48,6 +48,14 @@ class LiveBus:
             self._seq = last[-1]["seq"] if last else 0
         self._fh = open(self.log_path, "a", encoding="utf-8") if self.log_path else None
         self._last_flush = time.monotonic()
+        self._closed = threading.Event()
+        if self._fh:  # never leave events waiting in memory: Claude reads the file
+            threading.Thread(target=self._flusher, daemon=True).start()
+
+    def _flusher(self) -> None:
+        while not self._closed.wait(0.15):
+            with self._lock:
+                self._maybe_flush(force=True)
 
     def subscribe(self, fn: Callable[[dict], None], kinds: set[str] | list[str] | None = None) -> None:
         self._subs.append((set(kinds) if kinds else None, fn))
@@ -72,7 +80,7 @@ class LiveBus:
         return ev
 
     def _maybe_flush(self, force: bool = False) -> None:
-        if self._fh and self._pending and (force or time.monotonic() - self._last_flush > 0.3):
+        if self._fh and not self._fh.closed and self._pending and (force or time.monotonic() - self._last_flush > 0.3):
             self._fh.write("\n".join(self._pending) + "\n")
             self._fh.flush()
             self._pending.clear()
@@ -83,6 +91,7 @@ class LiveBus:
             self._maybe_flush(force=True)
 
     def close(self) -> None:
+        self._closed.set()
         self.flush()
         if self._fh:
             self._fh.close()

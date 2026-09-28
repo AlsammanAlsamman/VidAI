@@ -55,9 +55,19 @@ def studio_start(brief: dict, stats: dict[str, str] | list[str] | None = None, c
     Then follow the live stream with live_stats / live_control, and studio_wait until it is done."""
     from .session import create_session, launch_gui
 
+    from .models_dl import prefetch_background
+    from .profile import Profile
+
+    prof = Profile()
+    for k, v in (prof.pref("brief_defaults") or {}).items():  # answers the user always gives
+        brief.setdefault(k, v)
+    if capture is None and prof.pref("capture_mode"):
+        capture = {"mode": prof.pref("capture_mode")}
+    prefetch_background()  # VidAI fetches its own tracker models; Claude never downloads anything
     s = create_session(brief, stats, capture, root=root, live=live, silence_db=silence_db, min_silence=min_silence)
     out = {"session": s.dir, "video": str(s.video_path), "anchor_config": s.anchors.model_dump(),
-           "capture": s.capture.model_dump(), "live": s.live.model_dump()}
+           "capture": s.capture.model_dump(), "live": s.live.model_dump(),
+           "learned_about_user": prof.summary()["lessons"][-10:]}
     if open_gui:
         out["gui_pid"] = launch_gui(s, autostart=autostart)
         out["tell_user"] = ("The VidAI Recorder window is open. Press Record (or space). While recording: "
@@ -149,23 +159,31 @@ def live_control(session: str, commands: list[dict], wait: float = 3.0, done: bo
         return {"error": f"not recording (state={state})"}
     before = read_events(_live_log(session), 0, None, 1)
     seq0 = before[-1]["seq"] if before else 0
-    commands = list(commands) + ([{"cmd": "done"}] if done else [])
+    import uuid
+
+    commands = [dict(c) for c in commands] + ([{"cmd": "done"}] if done else [])
+    ids = []
+    for c in commands:
+        c["id"] = c.get("id") or uuid.uuid4().hex[:10]
+        ids.append(c["id"])
     with open(Path(session) / "control.jsonl", "a", encoding="utf-8") as f:
         for c in commands:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
-    results: list[dict] = []
+    got: dict[str, dict] = {}
     end = _t.time() + wait
-    while _t.time() < end and len(results) < len(commands):
-        _t.sleep(0.15)
-        results = [e for e in read_events(_live_log(session), seq0, ["ack", "error"], 10 ** 6)
-                   if e["data"].get("source") in ("claude", None) or e["kind"] == "error"]
-    shown = [e for e in results if e["data"].get("command") != "done"]
-    return {"results": [{"kind": e["kind"], **e["data"]} for e in shown],
-            "missing": max(0, len(commands) - len(results))}
+    while _t.time() < end and len(got) < len(ids):
+        _t.sleep(0.1)
+        for e in read_events(_live_log(session), seq0, ["ack", "error"], 10 ** 6):
+            if e["data"].get("id") in ids:
+                got[e["data"]["id"]] = {"kind": e["kind"], **e["data"]}
+    shown = [got[i] for i in ids if i in got and got[i].get("command") != "done"]
+    for r in shown:
+        r.pop("id", None)
+    return {"results": shown, "missing": len(ids) - len(got)}
 
 
 def live_processor(session: str, name: str, code: str, params: dict | None = None, duration: float | None = None,
-                   wait: float = 4.0, done: bool = True) -> dict:
+                   wait: float = 4.0, done: bool = True, save_as: str | None = None, description: str = "") -> dict:
     """Write a processor (Python code, see live_guide('processors')) and load it into the running recorder.
     Replaces a processor with the same name. Returns the ack or the error to fix."""
     from .live.bus import read_events
@@ -188,9 +206,225 @@ def live_processor(session: str, name: str, code: str, params: dict | None = Non
     out["file"] = str(path)
     if errs:
         out["runtime_error"] = errs[0]  # keep the icon on: fix the code and call again
-    elif done:
-        live_control(session, [], wait=1.0, done=True)
+    else:
+        if save_as:  # reusable next time with live_effect(session, save_as)
+            import json
+
+            (_library() / f"{save_as}.py").write_text(code, encoding="utf-8")
+            (_library() / f"{save_as}.json").write_text(json.dumps(
+                {"description": description or name, "params": params or {}}, ensure_ascii=False, indent=1))
+            out["saved_to_library"] = save_as
+        if done:
+            live_control(session, [], wait=1.0, done=True)
     return out
+
+
+def live_wait_request(session: str, since: int = 0, timeout: float = 300) -> dict:
+    """Block until the user asks Claude something by voice (or the recording ends / timeout).
+    Use this in a loop while the user records: it replaces polling. Pass back `next` as `since`.
+    Returns the request(s), what VidAI already handled itself (fast path), and the active effects."""
+    import time as _t
+
+    from .live.bus import read_events
+    from .session import check_session
+
+    end = _t.time() + timeout
+    fast: list[dict] = []
+    while True:
+        evs = read_events(_live_log(session), since, None, 10 ** 7)
+        if evs:
+            since = evs[-1]["seq"]
+        fast += [e["data"] for e in evs if e["kind"] == "action" and e["data"].get("what") == "fast_request"]
+        reqs = [{"request": e["seq"], "t": e["t"], "message": e["data"]["message"]} for e in evs
+                if e["kind"] == "claude" and e["data"].get("message")]
+        state = check_session(session).state
+        if reqs or state in ("done", "error", "cancelled") or _t.time() >= end:
+            active = [e["data"].get("name") for e in read_events(_live_log(session), 0, ["action"], 10 ** 7)
+                      if e["data"].get("what") in ("processor_added",)]
+            return {"state": state, "requests": reqs, "handled_by_vidai": fast, "next": since,
+                    "effects_added_so_far": active,
+                    "hint": "answer with ONE live_control/live_effect/live_processor call, then wait again"}
+        _t.sleep(0.25)
+
+
+def _library() -> Path:
+    from .lab import vidai_home
+
+    d = vidai_home() / "effects"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def live_effects() -> dict:
+    """Effects Claude can use without writing code: built-ins (attach stickers to hands/head/eyes, big_eyes,
+    text, zoom, blur, captions, ...) and the saved library of effects written in earlier sessions."""
+    from .live.processors import TARGETS
+    from .live.stickers import WORDS
+
+    lib = {}
+    for f in sorted(_library().glob("*.json")):
+        import json
+
+        lib[f.stem] = json.loads(f.read_text())
+    return {
+        "attach": {"cmd": "add", "type": "attach", "params": {"what": "emoji | word | image path",
+                                                              "to": list(TARGETS), "scale": 1.0}},
+        "sticker_words": sorted(WORDS),
+        "builtin_types": ["attach", "big_eyes", "text", "shape", "image", "zoom", "blur", "captions", "model"],
+        "library": lib,
+    }
+
+
+def live_effect(session: str, name: str, params: dict | None = None, instance: str | None = None,
+                done: bool = True) -> dict:
+    """Add a saved library effect (see live_effects) to the running recorder — no code needed."""
+    import json
+
+    meta = json.loads((_library() / f"{name}.json").read_text())
+    cmd = {"cmd": "add", "name": instance or f"fx_{name}", "file": str(_library() / f"{name}.py"),
+           "params": {**meta.get("params", {}), **(params or {})}}
+    return live_control(session, [cmd], done=done)
+
+
+# ---------- VidAI's own privileged actions (no Claude Code permission prompts) ----------
+def _recorder_alive(session: str | None) -> bool:
+    if not session:
+        return False
+    from .session import Session, pid_alive
+
+    try:
+        st = Session.load(session).status
+    except OSError:
+        return False
+    return st.state in ("ready", "recording") and pid_alive(st.gui_pid)
+
+
+def vidai_action(action: str, args: dict, session: str | None = None, reason: str = "",
+                 confirmed: bool = False, timeout: float = 90) -> dict:
+    """Let VidAI itself install / download / create (action = install | download | create_file).
+    Full-access session ("VidAI, take all actions") -> runs at once. Otherwise VidAI asks the user out loud
+    in the recorder ("Master, I need to ...") and waits for "VidAI confirm/deny". Outside a recording, returns
+    needs_confirmation: ask the user in chat, then call again with confirmed=True."""
+    import time as _t
+    import uuid
+
+    from . import actions
+    from .live.bus import read_events
+
+    what = actions.describe(action, args) + (f" to {reason}" if reason else "")
+    mode = actions.get_mode(session) if session else "ask"
+    if not (confirmed or mode == "full"):
+        if not _recorder_alive(session):
+            return {"status": "needs_confirmation", "ask_user": f"VidAI needs to {what}. Allow?",
+                    "then": "call again with confirmed=True if the user agrees"}
+        rid = uuid.uuid4().hex[:8]
+        before = read_events(_live_log(session), 0, None, 1)
+        seq0 = before[-1]["seq"] if before else 0
+        live_control(session, [{"cmd": "ask", "id_ask": rid, "text": what}], done=False)
+        end = _t.time() + timeout
+        decision = None
+        while _t.time() < end and decision is None:
+            for e in read_events(_live_log(session), seq0, ["permission"], 10 ** 6):
+                if e["data"].get("request") == rid:
+                    decision = e["data"]
+            _t.sleep(0.2)
+        if decision is None:
+            return {"status": "no_answer", "asked": what}
+        if decision["state"] != "approved":
+            actions.log("denied", requested=action, what=what)
+            return {"status": "denied", "asked": what}
+    a = dict(args)
+    if action == "create_file" and session and "session" not in a:
+        a["session"] = session
+    try:
+        result = actions.RUN[action](a)
+    except Exception as e:
+        return {"status": "failed", "error": str(e)[:500]}
+    return {"status": "done", "mode": mode, **result}
+
+
+def vidai_install(packages: list[str], session: str | None = None, reason: str = "",
+                  confirmed: bool = False) -> dict:
+    """VidAI installs Python packages into its own environment (asks the user first unless full access)."""
+    return vidai_action("install", {"packages": packages}, session, reason, confirmed)
+
+
+def vidai_download(url: str, name: str | None = None, session: str | None = None, reason: str = "",
+                   confirmed: bool = False) -> dict:
+    """VidAI downloads a file into ~/.vidai/work/downloads (asks the user first unless full access)."""
+    return vidai_action("download", {"url": url, "name": name}, session, reason, confirmed)
+
+
+def vidai_create_file(relpath: str, content: str, session: str | None = None, reason: str = "",
+                      confirmed: bool = False) -> dict:
+    """VidAI creates a file in the session folder (or ~/.vidai/work) (asks first unless full access)."""
+    return vidai_action("create_file", {"relpath": relpath, "content": content}, session, reason, confirmed)
+
+
+def vidai_permissions(session: str | None = None, mode: str | None = None) -> dict:
+    """Show (or set, with the user's consent: 'ask' | 'full') the permission mode, plus recent actions."""
+    from . import actions
+
+    if mode in ("ask", "full"):
+        if _recorder_alive(session):
+            live_control(session, [{"cmd": "mode", "mode": mode}], done=False)
+        else:
+            actions.set_mode(session, mode)
+    log = actions.home() / "actions.log"
+    recent = log.read_text(encoding="utf-8").splitlines()[-10:] if log.exists() else []
+    return {"mode": actions.get_mode(session), "recent_actions": recent}
+
+
+# ---------- VidAI's memory of the user (learns from every video) ----------
+def vidai_profile() -> dict:
+    """What VidAI has learned about this user: lessons from past mistakes, word corrections, instant macros,
+    preferences, frequent words, recent sessions. Read it at the start of every session."""
+    from .profile import Profile
+
+    return Profile().summary()
+
+
+def vidai_learn(kind: str, data: dict) -> dict:
+    """Teach VidAI something for all future videos.
+    kind = lesson {"lesson": "...", "tags": [...]} | correction {"heard": "...", "meant": "..."} |
+           macro {"phrase": "...", "commands": [live_control commands]} | preference {"key": "...", "value": ...} |
+           words {"words": ["BLAST", "NCBI"]}"""
+    from .profile import Profile
+
+    p = Profile()
+    if kind == "lesson":
+        p.add_lesson(data["lesson"], data.get("tags"))
+    elif kind == "correction":
+        p.learn_correction(data["heard"], data["meant"])
+    elif kind == "macro":
+        p.add_macro(data["phrase"], data["commands"], source="claude")
+    elif kind == "preference":
+        p.set_pref(data["key"], data["value"])
+    elif kind == "words":
+        p.add_words(data["words"])
+    else:
+        raise ValueError(f"unknown kind {kind!r}")
+    return {"learned": kind}
+
+
+def vidai_forget(kind: str, key: str) -> dict:
+    """Forget a macro (by phrase), a correction (by heard text) or a preference (by key)."""
+    from .profile import Profile, _norm
+
+    p = Profile()
+    if kind == "macro":
+        return {"forgot": p.forget_macro(key)}
+    if kind == "correction":
+        voc = p.vocabulary()
+        ok = voc.pop(_norm(key), None) is not None
+        p._save("vocabulary.json", voc)
+        return {"forgot": ok}
+    if kind == "preference":
+        prefs = p.prefs()
+        ok = prefs.pop(key, None) is not None
+        p._save("prefs.json", prefs)
+        return {"forgot": ok}
+    raise ValueError(f"unknown kind {kind!r}")
 
 
 def live_status(session: str) -> dict:

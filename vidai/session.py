@@ -251,6 +251,12 @@ class SessionRecorder:
             if (a.segments_of(kind) or a.events_of(kind)) and kind not in a.selected_stats:
                 a.selected_stats[kind] = "live"
         path = a.save()
+        from .profile import Profile
+
+        prof = Profile()  # remember the answers the user gives every time
+        prof.set_pref("brief_defaults", {k: v for k, v in {"language": s.brief.language, "style": s.brief.style,
+                                                           "audience": s.brief.audience}.items() if v})
+        prof.set_pref("capture_mode", s.capture.mode if s.capture.mode != "test" else prof.pref("capture_mode"))
         s.set_status(state="done", finished=time.strftime("%Y-%m-%d %H:%M:%S"), duration=round(dur, 2),
                      anchors=str(path), message="recording saved; back to Claude for editing")
         return a

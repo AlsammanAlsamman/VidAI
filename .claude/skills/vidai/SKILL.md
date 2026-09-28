@@ -8,6 +8,11 @@ description: VidAI video plugin. Use when the user says "vidai" (or asks to reco
 VidAI tools come from the `vidai` MCP server (fallback: the `vidai` CLI, which prints JSON).
 Times are always **source-video seconds**. The source recording is never modified.
 
+## Phase 0 — Remember the user (always first)
+
+Call `vidai_profile()`: lessons from past mistakes, word corrections, instant macros, preferences and recent
+sessions. Follow the lessons; don't ask what the profile already answers (brief defaults are filled in).
+
 ## Phase 1 — Brief (when the user says "vidai")
 
 Interview the user before anything else. Use what you already know about them (memory, earlier
@@ -44,13 +49,30 @@ Show the user a 3–5 line summary of the config (what you will track and why).
   (then repeat the sentence), ctrl+alt+n new section, ctrl+alt+i important, ctrl+alt+s stop.
 - Tell them about voice: "VidAI mark / mistake / new section <title> / important / zoom in / zoom out /
   captions on / stop", and "VidAI <anything else>" reaches you (Arabic works too: فيداي ...).
-- **While recording (slow loop):** poll `live_stats(session, since=next)` every ~10 s:
-  - handle `claude_requests` (the user asked you something by voice) with `live_control` or `live_processor`
-  - react to stats (long silence, screen_text, learner changes, errors) and adjust processors/rules
-  - write a new processor with `live_processor(session, name, code)` when commands/rules are not enough;
-    if it returns `runtime_error`, fix the code and call it again
-  - keep it light: effects should help the video, not distract
+- **While recording: answer fast, only with VidAI tools (no Bash, no downloads, no file writes).**
+  Loop: `live_wait_request(session, since=next)` → it returns the request text → answer with ONE call → wait again.
+  - VidAI already handles common requests itself (`handled_by_vidai`): stickers on hands/head/eyes/face,
+    pop-out eyes, remove, bigger/smaller, swap hands. Don't redo those.
+  - Prefer, in this order: `live_control` with built-ins (`attach` any emoji/word to hand | right_hand |
+    left_hand | finger | head | above_head | face | eyes | nose | mouth | screen; `big_eyes`, `text`, `zoom`,
+    `blur`, `shape`, `captions`) → `live_effect(session, name)` from the saved library (`live_effects()`) →
+    only if nothing fits, `live_processor(session, name, code, save_as=...)` (hands/face are in `ctx.tracks`,
+    VidAI downloads models itself). Save new effects with `save_as` so next time is instant.
+  - No checks before answering; keep chat messages to one line while the user records.
+  - Need to install, download or create something? Never use Bash/Write/curl/pip yourself — ask VidAI:
+    `vidai_install(packages, session, reason)`, `vidai_download(url, name, session, reason)`,
+    `vidai_create_file(relpath, content, session, reason)`. VidAI says "Master, I need to ..." and waits for
+    "VidAI confirm / deny" (or the window buttons); if the user said "VidAI, take all actions" it just runs.
+    Outside a recording it returns `needs_confirmation`: ask the user in chat, then call again with confirmed=True.
 - Stop polling when `state` is no longer "recording" (or use `studio_wait`).
+
+## Phase 3b — Learn (after every recording)
+
+VidAI learns by itself (misheard phrases corrected by the user, effects removed right away, Claude's answers
+kept → instant macros, size/hand preferences). Also review the session yourself and teach it what it cannot
+see: `vidai_learn("lesson", {"lesson": "..."})` for mistakes and what to do instead, `("correction", ...)`
+for misheard words, `("words", {"words": [...]})` for topic names, `("macro", ...)` for a request that should
+be instant next time. `vidai_forget(...)` removes anything wrong. Tell the user in one line what was learned.
 
 ## Phase 4 — Understand (anchors first, never scan the whole video)
 

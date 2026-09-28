@@ -45,6 +45,7 @@ def register(cls: type["LiveProcessor"]) -> type["LiveProcessor"]:
 
 class LiveProcessor:
     type_name = ""
+    tracking: bool = False  # True = needs hands/face tracking (ctx.tracks)
     defaults: dict[str, Any] = {}
     listens: set[str] = set()
     budget_ms: float = 8.0
@@ -79,6 +80,13 @@ class Context:
     def __init__(self, bus, width: int, height: int) -> None:
         self.bus, self.width, self.height = bus, width, height
         self._cache: dict[Any, np.ndarray] = {}
+        self.tracks = None  # vidai.live.trackers.Tracks, started when an effect needs it
+
+    def need_tracking(self) -> None:
+        if self.tracks is None:
+            from .trackers import Tracks
+
+            self.tracks = Tracks(self.bus)
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -287,6 +295,8 @@ class ProcessorChain:
         self.scale = scale  # budget scale (e.g. smaller frames -> same budget)
 
     def add(self, p: LiveProcessor) -> LiveProcessor:
+        if p.tracking:
+            self.ctx.need_tracking()
         self.remove(p.name)
         self.items.append(p)
         self.items.sort(key=lambda q: q.stage)  # stable: transforms first, then overlays in insertion order
@@ -408,3 +418,122 @@ class Thinking(LiveProcessor):
     def configure(self, params):
         super().configure(params)
         self._sprites.clear()
+
+
+TARGETS = ("hand", "right_hand", "left_hand", "other_hand", "finger", "head", "above_head", "face", "eyes",
+           "nose", "mouth", "screen")
+
+
+@register
+class Attach(LiveProcessor):
+    """Stick an emoji / word / image to a body part and follow it.
+    params: what (emoji, word like "apple", or image path), to (hand | right_hand | left_hand | other_hand |
+    finger | head | above_head | face | eyes | nose | mouth | screen), scale, dx, dy (offsets, fraction of
+    the part's size), position (for to=screen)."""
+    type_name = "attach"
+    tracking = True
+    defaults = {"what": "🍎", "to": "hand", "scale": 1.0, "dx": 0.0, "dy": 0.0, "position": "bottom-left"}
+
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self.alpha = 0.0
+
+    def _place(self, W: int, H: int, tr) -> tuple[float, float, float] | None:
+        """(center_x_px, center_y_px, width_px) or None if the part is not visible."""
+        to, sc = self.params["to"], self.params["scale"]
+        if to in ("hand", "right_hand", "left_hand", "other_hand", "finger"):
+            side = {"hand": "any", "right_hand": "Right", "left_hand": "Left", "other_hand": "other",
+                    "finger": "any"}[to]
+            h = tr.hand(side)
+            if h is None:
+                return None
+            w = h.size * W * 1.6 * sc
+            if to == "finger":
+                return h.tip[0] * W, h.tip[1] * H - w * 0.3, w * 0.6
+            return h.palm[0] * W, h.palm[1] * H - w * 0.35, w
+        f = tr.face_now()
+        if f is None:
+            return None
+        fw = f.width * W
+        if to == "head":
+            return f.top[0] * W, f.top[1] * H - fw * 0.22 * sc, fw * 1.25 * sc
+        if to == "above_head":
+            return f.top[0] * W, f.top[1] * H - fw * 0.6 * sc, fw * 0.8 * sc
+        if to == "face":
+            return (f.box[0] + f.box[2] / 2) * W, (f.box[1] + f.box[3] / 2) * H, fw * 1.1 * sc
+        if to == "eyes":
+            (x1, y1), (x2, y2) = f.eyes
+            dist = np.hypot((x2 - x1) * W, (y2 - y1) * H)
+            return (x1 + x2) / 2 * W, (y1 + y2) / 2 * H, dist * 2.3 * sc
+        if to == "nose":
+            return f.nose[0] * W, f.nose[1] * H, fw * 0.35 * sc
+        if to == "mouth":
+            return f.mouth[0] * W, f.mouth[1] * H, fw * 0.45 * sc
+        return None
+
+    def process(self, frame, t, ctx):
+        from .stickers import scaled
+
+        H, W = frame.shape[:2]
+        if self.params["to"] == "screen":
+            spr = scaled(self.params["what"], W * 0.12 * self.params["scale"])
+            from ..overlays import resolve_position
+
+            x, y = resolve_position(self.params["position"], W, H, spr.shape[1], spr.shape[0])
+            native.alpha_blend(frame, spr, x, y)
+            return frame
+        tr = ctx.tracks
+        place = self._place(W, H, tr) if tr is not None else None
+        self.alpha = min(1.0, self.alpha + 0.25) if place else max(0.0, self.alpha - 0.15)
+        if place:
+            self._last = place
+        if self.alpha <= 0 or not getattr(self, "_last", None):
+            return frame
+        cx, cy, w = self._last
+        spr = scaled(self.params["what"], w)
+        sh, sw = spr.shape[:2]
+        cx += self.params["dx"] * w
+        cy += self.params["dy"] * w
+        native.alpha_blend(frame, spr, int(cx - sw / 2), int(cy - sh / 2), self.alpha)
+        return frame
+
+
+@register
+class BigEyes(LiveProcessor):
+    """Cartoon pop-out eyes. params: zoom (magnification), size (eye patch size)."""
+    type_name = "big_eyes"
+    tracking = True
+    stage = 0
+    defaults = {"zoom": 1.8, "size": 1.0}
+
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self._masks: dict[int, np.ndarray] = {}
+
+    def _mask(self, r: int) -> np.ndarray:
+        if r not in self._masks:
+            yy, xx = np.mgrid[-r:r, -r:r]
+            dist = np.sqrt(xx ** 2 + yy ** 2) / r
+            self._masks[r] = np.clip((1.0 - dist) / 0.35, 0, 1)[..., None].astype(np.float32)
+        return self._masks[r]
+
+    def process(self, frame, t, ctx):
+        import cv2
+
+        f = ctx.tracks.face_now() if ctx.tracks else None
+        if f is None:
+            return frame
+        H, W = frame.shape[:2]
+        r = max(8, int(f.width * W * 0.17 * self.params["size"]))
+        z = max(1.05, float(self.params["zoom"]))
+        m = self._mask(r)
+        for ex, ey in f.eyes:
+            cx, cy = int(ex * W), int(ey * H)
+            x0, y0, x1, y1 = cx - r, cy - r, cx + r, cy + r
+            s = int(r / z)
+            if x0 < 0 or y0 < 0 or x1 > W or y1 > H or s < 2:
+                continue
+            big = cv2.resize(frame[cy - s:cy + s, cx - s:cx + s], (2 * r, 2 * r)).astype(np.float32)
+            roi = frame[y0:y1, x0:x1].astype(np.float32)
+            frame[y0:y1, x0:x1] = (big * m + roi * (1 - m)).astype(np.uint8)
+        return frame

@@ -56,6 +56,8 @@ class LiveConfig(BaseModel):
     learners: list[dict] = Field(default_factory=list)  # [{"name", "labels", "region"}]
     voice_actions: bool = True  # built-in voice commands (mark, zoom, captions, ...) act immediately
     thinking: str = "video"  # animated VidAI icon while Claude works on a request: video | preview | off
+    speak: bool = True  # VidAI talks (spd-say) when it needs permission
+    address: str = "Master"  # how VidAI addresses the user
     thinking_position: str = "top-right"
     thinking_timeout: float = 120.0  # hide the icon if Claude has not answered after this many seconds
 
@@ -100,7 +102,16 @@ class LivePipeline:
         self.pending: dict[int, dict] = {}  # Claude requests waiting for an answer (seq -> event)
         # a request to Claude is collected until the user stops talking ("... saying" <pause> "an award")
         self._req: dict | None = None
-        self.request_gap = 1.5  # seconds of quiet after the last words before the request is sent
+        self.asks: dict[str, str] = {}  # permission questions waiting for the user (id -> text)
+        # learning (vidai.profile): what each request did, so mistakes and good solutions are remembered
+        from ..profile import Profile
+
+        self.profile = Profile()
+        self.requests_log: list[dict] = []  # {msg, t, via, names, cmds, removed}
+        self._claude_req: dict | None = None  # the request Claude is answering now
+        self._probation: list[dict] = []  # Claude's solutions kept for a while -> become macros
+        self.learned: list[dict] = []
+        self.request_gap = 1.0  # seconds of quiet after the last words before the request is sent
         self._thinking: LiveProcessor | None = None
 
     # ------------------------------------------------------------------ start
@@ -129,6 +140,7 @@ class LivePipeline:
             self.stt = SpeechToText(self.bus, model, lang if lang and "+" not in lang else None,
                                     wake_words=(self.live.wake_words + WAKE) if self.live.wake_words else None,
                                     allowed_languages=self.live.stt_languages)
+            self.stt.profile = self.profile
         if self.live.ocr and recording:
             self.ocr = ScreenText(self.bus, self.live.ocr_interval, self.live.ocr_langs)
         self.bus.subscribe(self._on_voice, {"voice_command"})
@@ -239,6 +251,8 @@ class LivePipeline:
                         self.ocr.notify_motion(self.motion.values[-1])
                 for l in list(self.learners.values()):
                     l.feed(small, t)
+            if self.ctx.tracks is not None:
+                self.ctx.tracks.feed(frame)
             if self.ocr and self.ocr.want(t):
                 self.ocr.submit(frame, t)
             self.frames += 1
@@ -287,6 +301,7 @@ class LivePipeline:
             except OSError:
                 pass
             self._flush_request()
+            self._check_probation()
             if self.pending:
                 oldest = min(p["t"] for p in self.pending.values())
                 if self.clock() - oldest > self.live.thinking_timeout:
@@ -329,6 +344,7 @@ class LivePipeline:
                 self._req = {"parts": [args.strip()], "due": time.monotonic() + self.request_gap,
                              "waiting": False, "cap": time.monotonic() + 20.0, "seq": ev["seq"]}
                 self.bus.publish("action", {"what": "listening_request", "so_far": args.strip()})
+                self._flush_if_obvious()
             return
         if not self.live.voice_actions:
             return
@@ -347,6 +363,13 @@ class LivePipeline:
             self.command({"cmd": "remove", "name": "captions"}, source="voice")
         elif cmd == "stop":
             self.command({"cmd": "stop"}, source="voice")
+        elif cmd in ("confirm", "deny"):
+            if self.asks:
+                self.command({"cmd": cmd}, source="voice")
+        elif cmd == "full_access":
+            self.command({"cmd": "mode", "mode": "full"}, source="voice")
+        elif cmd == "ask_first":
+            self.command({"cmd": "mode", "mode": "ask"}, source="voice")
         elif cmd == "record":
             if self.on_start_request and not self.output:
                 self.on_start_request()
@@ -361,8 +384,14 @@ class LivePipeline:
             elif parts and self.learners:
                 self.command({"cmd": "label", "name": list(self.learners)[-1], "value": " ".join(parts)},
                              source="voice")
-        elif cmd == "wrong" and self.learners:
-            self.command({"cmd": "wrong", "name": list(self.learners)[-1]}, source="voice")
+        elif cmd == "wrong":
+            last = self.requests_log[-1] if self.requests_log else None
+            if last and last["names"] and self.clock() - last["t"] < 20:  # undo what VidAI just did
+                for n in last["names"]:
+                    self.command({"cmd": "remove", "name": n}, source="voice")
+                self.say("Sorry. What did you mean?")
+            elif self.learners:
+                self.command({"cmd": "wrong", "name": list(self.learners)[-1]}, source="voice")
 
     def _on_speech_for_request(self, ev: dict) -> None:
         r = self._req
@@ -374,6 +403,22 @@ class LivePipeline:
             r["parts"].append(ev["data"]["text"].strip())
             r["waiting"] = False
             r["due"] = time.monotonic() + self.request_gap
+            self._flush_if_obvious()
+
+    def _flush_if_obvious(self) -> None:
+        """Act at once when the fast path understands a finished sentence (no need to wait for the pause)."""
+        import re as _re
+
+        from .intents import match
+
+        r = self._req
+        if r is None:
+            return
+        msg = " ".join(" ".join(p.rstrip(".…") for p in r["parts"]).split())
+        unfinished = _re.search(r"\b(saying|says|say|with|and|the|a|an|to|on|in|my|of|that|above|over)\s*$",
+                                msg.lower())
+        if not unfinished and match(msg, self.chain):
+            self._flush_request(force=True)
 
     def _flush_request(self, force: bool = False) -> None:
         r = self._req
@@ -383,8 +428,118 @@ class LivePipeline:
         if force or now >= r["cap"] or (not r["waiting"] and now >= r["due"]) or \
                 (r["waiting"] and now >= r["due"] + 3.0):  # speech started but no transcript came
             self._req = None
-            msg = " ".join(p.rstrip(".…") for p in r["parts"]).replace("...", " ").strip()
-            self.bus.publish("claude", {"message": " ".join(msg.split()), "source": "voice"})
+            msg = " ".join(" ".join(p.rstrip(".…") for p in r["parts"]).replace("...", " ").split())
+            self.request(msg, source="voice")
+
+    def request(self, msg: str, source: str = "voice") -> dict:
+        """A request in plain words: handled locally when VidAI understands it (fast path, < 1 s),
+        otherwise sent to Claude (thinking icon until Claude answers)."""
+        from .intents import match
+
+        fixed = self.profile.correct(msg)
+        if fixed != msg:
+            self.bus.publish("action", {"what": "corrected", "heard": msg, "meant": fixed})
+            msg = fixed
+        via, cmds = "memory", None
+        macro = self.profile.find_macro(msg)
+        if macro:
+            cmds = [dict(c) for c in macro["commands"]]
+            self.profile.used_macro(macro["phrase"])
+        else:
+            via = "fast"
+            try:
+                cmds = match(msg, self.chain)
+            except Exception as e:
+                self.bus.publish("error", {"where": "fast_path", "error": repr(e)[:200]})
+            cmds = [self._apply_prefs(c) for c in cmds] if cmds else None
+        rec = {"msg": msg, "t": self.clock(), "via": via if cmds else "claude", "names": [], "cmds": [],
+               "removed": False}
+        self._finish_request_log(rec)
+        if cmds:
+            for c in cmds:
+                self.command(c, source=via)
+                if c.get("cmd") in ("add", "text", "zoom", "shape", "image", "blur"):
+                    rec["names"].append(c.get("name") or c.get("cmd"))
+            self.bus.publish("action", {"what": "fast_request", "message": msg, "commands": cmds, "via": via})
+            import re as _re
+
+            if _re.search(r"\bswap\b|\bswitch hands\b|\bother way\b", msg.lower()):  # learn once per swap
+                self.profile.set_pref("hands_swapped", not self.profile.pref("hands_swapped", False))
+                self._learned("preference", hands_swapped=self.profile.pref("hands_swapped"))
+            return {"handled": via, "commands": cmds}
+        self._claude_req = rec
+        self.bus.publish("claude", {"message": msg, "source": source})
+        return {"handled": "claude"}
+
+    # ------------------------------------------------------------------ learning
+    def _apply_prefs(self, c: dict) -> dict:
+        """Use what the user chose before (sizes, which hand) for a new effect."""
+        c = dict(c)
+        prm = dict(c.get("params") or {})
+        if c.get("type") == "attach":
+            sc = self.profile.pref(f"scale:{prm.get('what')}")
+            if sc and "scale" not in (c.get("params") or {}):
+                prm["scale"] = sc
+            if self.profile.pref("hands_swapped") and prm.get("to") in ("right_hand", "left_hand"):
+                prm["to"] = {"right_hand": "left_hand", "left_hand": "right_hand"}[prm["to"]]
+            c["params"] = prm
+        return c
+
+    def _finish_request_log(self, new: dict) -> None:
+        """A new request right after one whose result was removed = that one was misunderstood."""
+        prev = self.requests_log[-1] if self.requests_log else None
+        self.requests_log.append(new)
+        if prev and prev["removed"] and new["t"] - prev["t"] < 25:
+            import difflib
+
+            r = difflib.SequenceMatcher(None, prev["msg"].lower(), new["msg"].lower()).ratio()
+            if 0.5 <= r < 1.0 and self.profile.learn_correction(prev["msg"], new["msg"]):
+                self._learned("vocabulary", heard=prev["msg"], meant=new["msg"])
+
+    def _learned(self, kind: str, **info) -> None:
+        self.learned.append({"kind": kind, **info})
+        self.bus.publish("action", {"what": "learned", "kind": kind, **info})
+
+    def _track_learning(self, cmd: str | None, c: dict, source: str) -> None:
+        name = c.get("name")
+        # an effect removed soon after its request -> that request went wrong
+        if cmd == "remove" and name:
+            for rec in reversed(self.requests_log[-5:]):
+                if name in rec["names"] and self.clock() - rec["t"] < 20 and not rec["removed"]:
+                    rec["removed"] = True
+                    self._probation = [p for p in self._probation if p["msg"] != rec["msg"]]
+                    self.profile.add_lesson(f"The request '{rec['msg']}' was answered with {rec['names']} "
+                                            f"({rec['via']}) and the user removed it right away.",
+                                            ["mistake", rec["via"]], source="auto")
+                    if rec["via"] == "memory":
+                        self.profile.forget_macro(rec["msg"])
+                    self._learned("mistake", request=rec["msg"])
+        # size / hand adjustments become defaults
+        if cmd == "set" and name:
+            p = self.chain.get(name)
+            prm = c.get("params") or {}
+            if p is not None and "scale" in prm and p.params.get("what"):
+                self.profile.nudge_pref(f"scale:{p.params['what']}", float(prm["scale"]))
+        # what Claude does for a request -> candidate macro
+        if source == "claude" and self._claude_req is not None and cmd in (
+                "add", "text", "zoom", "shape", "image", "blur", "set", "remove", "enable", "disable", "rule"):
+            self._claude_req["cmds"].append({"cmd": cmd, **{k: v for k, v in c.items() if k != "for"}})
+            if cmd in ("add", "text", "zoom", "shape", "image", "blur"):
+                self._claude_req["names"].append(name or cmd)
+        if cmd == "done" and self._claude_req is not None:
+            if self._claude_req["cmds"]:
+                self._probation.append({**self._claude_req, "t_done": self.clock()})
+            self._claude_req = None
+
+    def _check_probation(self) -> None:
+        """Claude's answer kept for 20 s (not removed) -> remember it: next time the request is instant."""
+        now = self.clock()
+        for p in list(self._probation):
+            if now - p["t_done"] >= 20:
+                self._probation.remove(p)
+                if any(self.chain.get(n) is not None for n in p["names"]) or not p["names"]:
+                    self.profile.add_macro(p["msg"], p["cmds"])
+                    self._learned("macro", request=p["msg"])
 
     def _rule_action(self, action: dict, ev: dict, rule: dict) -> None:
         a = dict(action)
@@ -435,13 +590,20 @@ class LivePipeline:
         """Apply one command (from Claude's control file, a rule, a voice command or the GUI)."""
         c = dict(c)
         cmd = c.pop("cmd", None)
+        cid = c.pop("id", None)  # echoed back so the sender can match replies exactly
+        tag = {"id": cid} if cid else {}
         t = self.clock()
         try:
+            self._track_learning(cmd, c, source)
+        except Exception as e:
+            self.bus.publish("error", {"where": "learning", "error": repr(e)[:200]})
+        try:
             res = self._do(cmd, c, t)
-            self.bus.publish("ack", {"command": cmd, "source": source, **(res or {})})
+            self.bus.publish("ack", {"command": cmd, "source": source, **tag, **(res or {})})
             return res or {}
         except Exception as e:
-            self.bus.publish("error", {"where": "command", "command": cmd, "source": source, "error": repr(e)[:300]})
+            self.bus.publish("error", {"where": "command", "command": cmd, "source": source, **tag,
+                                       "error": repr(e)[:300]})
             return {"error": repr(e)}
 
     def _do(self, cmd: str | None, c: dict, t: float) -> dict | None:
@@ -527,12 +689,79 @@ class LivePipeline:
             if not self.pending:
                 self._show_thinking(False)
             return {"pending": len(self.pending)}
+        if cmd == "ask":  # VidAI needs permission for an action (install, download, create...)
+            from .. import actions
+
+            rid, text = str(c["id_ask"]), c["text"]
+            if actions.get_mode(self.dir) == "full":
+                self.bus.publish("permission", {"request": rid, "state": "approved", "by": "full_access"})
+                return {"request": rid, "state": "approved"}
+            self.asks[rid] = text
+            self.say(f"{self.live.address}, I need to {text}. Say VidAI confirm, or VidAI deny.")
+            self.bus.publish("action", {"what": "asking", "request": rid, "text": text})
+            if self.stt:  # a bare "yes" / "confirm" right after the question is enough
+                self.stt.armed_until = self.clock() + 25
+            return {"request": rid, "state": "pending"}
+        if cmd in ("confirm", "deny"):
+            rid = str(c.get("request") or (list(self.asks)[-1] if self.asks else ""))
+            if rid not in self.asks:
+                return {"state": "nothing to answer"}
+            text = self.asks.pop(rid)
+            state = "approved" if cmd == "confirm" else "denied"
+            self.bus.publish("permission", {"request": rid, "state": state, "by": c.get("by", "user"), "text": text})
+            self.say("Done, working on it." if state == "approved" else "Okay, I won't.")
+            return {"request": rid, "state": state}
+        if cmd == "mode":  # "VidAI, take all actions" / "VidAI, ask me first"
+            from .. import actions
+
+            mode = "full" if c.get("mode") == "full" else "ask"
+            actions.set_mode(self.dir, mode)
+            self.bus.publish("permission_mode", {"mode": mode})
+            self.say("Full access. I will take all actions needed." if mode == "full"
+                     else "Okay, I will ask you first.")
+            if mode == "full":  # anything already waiting is approved too
+                for rid in list(self.asks):
+                    self.asks.pop(rid)
+                    self.bus.publish("permission", {"request": rid, "state": "approved", "by": "full_access"})
+            return {"mode": mode}
         if cmd == "thinking":  # Claude shows the icon itself while working on something longer
             self._show_thinking(bool(c.get("on", True)))
             return {"thinking": bool(c.get("on", True))}
         if cmd == "status":
             return self.status()
         raise ValueError(f"unknown command {cmd!r}")
+
+    def _remember_session(self) -> None:
+        import collections
+        import re as _re
+
+        for p in list(self._probation):  # keep what was not removed by the end
+            p["t_done"] = -1e9
+        self._check_probation()
+        stop = {"that", "this", "with", "have", "from", "will", "what", "your", "they", "about", "there", "then",
+                "vidai", "here", "just", "like", "going", "want", "make", "more", "some", "into", "them"}
+        words = collections.Counter(w for tr in (self.stt.transcripts if self.stt else [])
+                                    for w in _re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", tr["text"])
+                                    if w.lower() not in stop)
+        self.profile.add_words([w for w, n in words.items() if n >= 2 or w.isupper()])
+        reqs = self.requests_log
+        self.profile.add_history({
+            "session": str(self.dir or ""), "duration": round(self.clock(), 1),
+            "requests": [r["msg"] for r in reqs],
+            "answered_by": dict(collections.Counter(r["via"] for r in reqs)),
+            "removed_quickly": [r["msg"] for r in reqs if r["removed"]],
+            "errors": sum(1 for e in self.bus.history if e["kind"] == "error"),
+            "learned": self.learned,
+        })
+
+    def say(self, text: str) -> None:
+        """VidAI speaks (text-to-speech) and logs it, so the editor can cut these moments later."""
+        self.bus.publish("action", {"what": "vidai_said", "text": text})
+        if self.live.speak and shutil.which("spd-say"):
+            try:
+                subprocess.Popen(["spd-say", "-r", "5", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
 
     def status(self) -> dict:
         return {"t": round(self.clock(), 2), "frames": self.frames, "loop_ms": round(self.loop_ms, 2),
@@ -584,6 +813,10 @@ class LivePipeline:
             self.ocr.close()
         for l in self.learners.values():
             l.finish(self.clock())
+        if self.ctx.tracks is not None:
+            self.ctx.tracks.close()
+        if self.output:
+            self._remember_session()
         self.bus.publish("action", {"what": "stopped", "duration": round(self.clock(), 2)})
         self.bus.close()
         shutil.rmtree(self._tmp, ignore_errors=True)

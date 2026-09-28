@@ -303,6 +303,128 @@ def test_request_to_claude_waits_for_the_rest_of_the_sentence(tmp_path):
     assert not any(e["kind"] == "claude" for e in pl.bus.history)  # still waiting: the user is talking
     pl.bus.publish("transcript", {"text": "an award.", "is_command": False})
     time.sleep(1.0)
-    reqs = [e["data"]["message"] for e in pl.bus.history if e["kind"] == "claude"]
+    reqs = [e["data"]["message"] for e in pl.bus.history
+            if e["kind"] == "claude" or (e["kind"] == "action" and e["data"].get("what") == "fast_request")]
     pl.stop()
-    assert reqs == ["add a text above my head saying an award"]
+    assert reqs == ["add a text above my head saying an award"]  # one request, not two
+    assert pl.chain.get("fx_text_above_head").params["what"] == "text:An Award"  # text, not a trophy
+
+
+class _FakeTracks:
+    def __init__(self, hands=(), face=None):
+        self.hands, self.face = list(hands), face
+
+    def hand(self, which="any", max_age=0.4):
+        for h in self.hands:
+            if which in ("any", "hand") or h.side.lower() == which.lower():
+                return h
+        return None
+
+    def face_now(self, max_age=0.5):
+        return self.face
+
+
+def test_fast_path_understands_common_requests():
+    from vidai.live.intents import match
+
+    ch = ProcessorChain(Context(LiveBus(), 640, 360))
+    ch.ctx.need_tracking = lambda: None
+
+    def apply(text):
+        cmds = match(text, ch) or []
+        for c in cmds:
+            c = dict(c)
+            k = c.pop("cmd")
+            if k == "add":
+                ch.add(REGISTRY[c["type"]](c["name"], c.get("params", {})))
+            elif k == "remove":
+                ch.remove(c["name"])
+            elif k == "set":
+                ch.get(c["name"]).configure(c["params"])
+        return cmds
+
+    assert apply("add an apple in my hand")[0]["params"] == {"what": "🍎", "to": "hand"}
+    cmds = apply("put an orange on my other hand")
+    assert [c["params"]["to"] for c in cmds] == ["right_hand", "left_hand"]
+    assert apply("at horns on my head")[0]["params"]["to"] == "head"  # misheard "add"
+    assert apply("make my eyes pop up")[0]["type"] == "big_eyes"
+    assert apply("bigger apple")[0]["params"]["scale"] == pytest.approx(1.4)
+    assert apply("remove the apple") == [{"cmd": "remove", "name": "fx_apple_hand"}]
+    assert match("draw a spaceship flying around me", ch) is None  # new idea -> Claude
+    assert match("make the title bigger please", ch) is None
+    assert {c["name"] for c in apply("remove everything")} == {"fx_orange_left_hand", "fx_horns_head",
+                                                                "fx_big_eyes"}
+
+
+def test_attach_follows_the_tracked_part():
+    from vidai.live.trackers import Face, Hand
+
+    ctx = Context(LiveBus(), 640, 360)
+    ctx.tracks = _FakeTracks([Hand("Right", (0.25, 0.6), 0.12, (0.25, 0.4))],
+                             Face((0.55, 0.2, 0.2, 0.3), ((0.6, 0.3), (0.7, 0.3)), (0.65, 0.38), (0.65, 0.45)))
+    for to, (x, y) in {"hand": (160, 216), "head": (416, 72), "eyes": (416, 108)}.items():
+        p = REGISTRY["attach"]("a", {"what": "🍎", "to": to})
+        f = np.zeros((360, 640, 3), np.uint8)
+        for i in range(5):
+            f = p.process(f, i / 30, ctx)
+        ys, xs = np.nonzero(f.max(axis=2))
+        assert abs(xs.mean() - x) < 40 and abs(ys.mean() - y) < 50, (to, xs.mean(), ys.mean())
+    p = REGISTRY["attach"]("b", {"what": "🍎", "to": "left_hand"})  # not visible -> nothing drawn
+    assert p.process(np.zeros((360, 640, 3), np.uint8), 0, ctx).max() == 0
+
+
+def test_request_uses_fast_path_before_claude(tmp_path):
+    pl = LivePipeline(CaptureConfig(mode="test", out_height=360, mic=False), LiveConfig(stt=False), None,
+                      session_dir=tmp_path)
+    pl.ctx.need_tracking = lambda: None
+    pl.start()
+    assert pl.request("put a crown on my head")["handled"] == "fast"
+    assert pl.chain.get("fx_crown_head") is not None
+    assert pl.request("write a poem on the screen")["handled"] == "claude"
+    time.sleep(0.3)
+    pl.stop()
+    kinds = [e["kind"] for e in pl.bus.history]
+    assert kinds.count("claude") == 1
+
+
+def test_wait_request_and_effect_library(tmp_path):
+    import threading
+
+    from vidai import service
+    from vidai.session import SessionRecorder, create_session
+
+    s = create_session({"title": "w"}, capture=CaptureConfig(mode="test", out_height=360, mic=False), root=tmp_path,
+                       live={"stt": False})
+    r = SessionRecorder(s)
+    r.start()
+    time.sleep(0.8)
+    threading.Timer(0.5, lambda: r.pipe.request("add a spinning planet above me")).start()
+    got = service.live_wait_request(s.dir, 0, timeout=10)
+    assert got["requests"][0]["message"] == "add a spinning planet above me"
+    code = ("from vidai.live.processors import LiveProcessor, register\n"
+            "@register\nclass Planet(LiveProcessor):\n    def process(self, frame, t, ctx):\n        return frame\n")
+    out = service.live_processor(s.dir, "planet", code, save_as="planet", description="spinning planet")
+    assert out["saved_to_library"] == "planet"
+    assert "planet" in service.live_effects()["library"]
+    res = service.live_effect(s.dir, "planet", instance="planet2")
+    assert res["results"][0]["kind"] == "ack"
+    r.stop()
+    assert service.live_wait_request(s.dir, got["next"], timeout=5)["state"] == "done"
+
+
+def test_obvious_request_acts_without_waiting(tmp_path):
+    pl = LivePipeline(CaptureConfig(mode="test", out_height=360, mic=False), LiveConfig(stt=False), None,
+                      session_dir=tmp_path)
+    pl.ctx.need_tracking = lambda: None
+    pl.request_gap = 5.0  # would be slow if it waited
+    pl.start()
+    t0 = time.monotonic()
+    pl.bus.publish("voice_command", {"command": "claude", "args": "add an apple in my hand", "text": "..."})
+    while pl.chain.get("fx_apple_hand") is None and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    took = time.monotonic() - t0
+    pl.bus.publish("voice_command", {"command": "claude", "args": "add a text above my head saying", "text": "..."})
+    time.sleep(0.3)
+    assert pl._req is not None  # unfinished sentence: still listening
+    pl.stop()
+    assert took < 0.5
