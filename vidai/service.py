@@ -144,7 +144,8 @@ def live_stats(session: str, since: int = 0, kinds: list[str] | None = None, lim
             "claude_requests": [e for e in evs if e["kind"] == "claude"]}
 
 
-def live_control(session: str, commands: list[dict], wait: float = 3.0, done: bool = True) -> dict:
+def live_control(session: str, commands: list[dict], wait: float = 3.0, done: bool = True,
+                 learn: bool = True) -> dict:
     """Send commands to the running recorder (see live_guide('commands')). Waits for their ack/error.
     done=True also tells the recorder the user's pending request is answered (hides the thinking icon);
     pass done=False when you will send more commands for the same request."""
@@ -161,7 +162,8 @@ def live_control(session: str, commands: list[dict], wait: float = 3.0, done: bo
     seq0 = before[-1]["seq"] if before else 0
     import uuid
 
-    commands = [dict(c) for c in commands] + ([{"cmd": "done"}] if done else [])
+    commands = [dict(c, **({} if learn else {"no_learn": True})) for c in commands] + (
+        [{"cmd": "done"}] if done else [])
     ids = []
     for c in commands:
         c["id"] = c.get("id") or uuid.uuid4().hex[:10]
@@ -279,14 +281,14 @@ def live_effects() -> dict:
 
 
 def live_effect(session: str, name: str, params: dict | None = None, instance: str | None = None,
-                done: bool = True) -> dict:
+                done: bool = True, learn: bool = True) -> dict:
     """Add a saved library effect (see live_effects) to the running recorder — no code needed."""
     import json
 
     meta = json.loads((_library() / f"{name}.json").read_text())
     cmd = {"cmd": "add", "name": instance or f"fx_{name}", "file": str(_library() / f"{name}.py"),
            "params": {**meta.get("params", {}), **(params or {})}}
-    return live_control(session, [cmd], done=done)
+    return live_control(session, [cmd], done=done, learn=learn)
 
 
 # ---------- VidAI's own privileged actions (no Claude Code permission prompts) ----------

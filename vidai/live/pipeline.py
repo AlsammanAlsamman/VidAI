@@ -502,6 +502,8 @@ class LivePipeline:
 
     def _track_learning(self, cmd: str | None, c: dict, source: str) -> None:
         name = c.get("name")
+        if c.get("no_learn"):  # e.g. Claude restoring an older effect: not part of this request's answer
+            return
         # an effect removed soon after its request -> that request went wrong
         if cmd == "remove" and name:
             for rec in reversed(self.requests_log[-5:]):
@@ -592,10 +594,11 @@ class LivePipeline:
         c = dict(c)
         cmd = c.pop("cmd", None)
         cid = c.pop("id", None)  # echoed back so the sender can match replies exactly
+        no_learn = c.pop("no_learn", False)
         tag = {"id": cid} if cid else {}
         t = self.clock()
         try:
-            self._track_learning(cmd, c, source)
+            self._track_learning(cmd, {**c, "no_learn": no_learn}, source)
         except Exception as e:
             self.bus.publish("error", {"where": "learning", "error": repr(e)[:200]})
         try:
