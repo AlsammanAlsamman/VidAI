@@ -321,10 +321,12 @@ class RecorderApp:
             self._start_recording()
 
     def _start_recording(self) -> None:
+        carry = self.preview.carry_specs() if self.preview else []
         self._stop_preview()
         self.session.capture.mode = self._mode_value()  # type: ignore[assignment]
         self.session.capture.mic = bool(self.mic.get())
-        self.rec = SessionRecorder(self.session, on_frame=self._on_frame, on_stop_request=self._stop_requested.set)
+        self.rec = SessionRecorder(self.session, on_frame=self._on_frame, on_stop_request=self._stop_requested.set,
+                                   carry=carry)
         try:
             self.rec.start()
         except Exception as e:

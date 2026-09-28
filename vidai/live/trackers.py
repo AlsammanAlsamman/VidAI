@@ -62,7 +62,8 @@ class Tracks:
         import cv2
 
         H, W = frame.shape[:2]
-        small = cv2.resize(frame, (self.width, int(H * self.width / W)), interpolation=cv2.INTER_AREA)
+        k = max(1, W // (self.width * 2))  # 1920 -> stride 1 view of every k-th pixel, then linear resize
+        small = cv2.resize(frame[::k, ::k], (self.width, int(H * self.width / W)), interpolation=cv2.INTER_LINEAR)
         with self._lock:
             self._frame = small
 

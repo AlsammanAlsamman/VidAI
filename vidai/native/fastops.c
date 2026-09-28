@@ -88,9 +88,27 @@ void alpha_blend(uint8_t *frame, int32_t fw, int32_t fh, const uint8_t *ov, int3
             int32_t a = (s[3] * op) >> 8;
             if (a == 0) continue;
             if (a >= 255) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; continue; }
-            d[0] = (uint8_t)((s[0] * a + d[0] * (255 - a) + 127) / 255);
-            d[1] = (uint8_t)((s[1] * a + d[1] * (255 - a) + 127) / 255);
-            d[2] = (uint8_t)((s[2] * a + d[2] * (255 - a) + 127) / 255);
+            int32_t b = 255 - a;
+            d[0] = (uint8_t)(((s[0] * a + d[0] * b + 128) * 257) >> 16);
+            d[1] = (uint8_t)(((s[1] * a + d[1] * b + 128) * 257) >> 16);
+            d[2] = (uint8_t)(((s[2] * a + d[2] * b + 128) * 257) >> 16);
         }
+    }
+}
+
+/* dst = dst * m + src * (1 - m), m = mask/255, per pixel (RGB uint8, mask uint8, same size). In place on dst.
+ * Used by background replacement: dst = camera frame, src = new background, mask = person. */
+void mask_blend(uint8_t *dst, const uint8_t *src, const uint8_t *mask, int64_t npix) {
+    #pragma omp parallel for schedule(static) if (npix > 200000)
+    for (int64_t p = 0; p < npix; p++) {
+        int32_t a = mask[p];
+        if (a == 255) continue;
+        uint8_t *d = dst + p * 3;
+        const uint8_t *s = src + p * 3;
+        if (a == 0) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; continue; }
+        int32_t b = 255 - a;  /* x / 255 == ((x + 128) * 257) >> 16 for x in 0..65025 (no division) */
+        d[0] = (uint8_t)(((d[0] * a + s[0] * b + 128) * 257) >> 16);
+        d[1] = (uint8_t)(((d[1] * a + s[1] * b + 128) * 257) >> 16);
+        d[2] = (uint8_t)(((d[2] * a + s[2] * b + 128) * 257) >> 16);
     }
 }

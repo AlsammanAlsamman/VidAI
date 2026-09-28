@@ -200,9 +200,12 @@ def live_processor(session: str, name: str, code: str, params: dict | None = Non
     out = live_control(session, [cmd], wait, done=False)
     import time as _t
 
-    _t.sleep(0.8)  # let it run a few frames: runtime errors show up as error events
-    errs = [e["data"] for e in read_events(_live_log(session), seq0, ["error"], 10 ** 6)
-            if e["data"].get("processor") == name][-1:]
+    errs: list = []
+    end = _t.time() + 2.5  # let it run ~75 frames: crashes and "too slow" show up as error events
+    while _t.time() < end and not errs:
+        _t.sleep(0.25)
+        errs = [e["data"] for e in read_events(_live_log(session), seq0, ["error"], 10 ** 6)
+                if e["data"].get("processor") == name][-1:]
     out["file"] = str(path)
     if errs:
         out["runtime_error"] = errs[0]  # keep the icon on: fix the code and call again

@@ -67,6 +67,7 @@ def _load() -> None:
     _lib.frame_mad.argtypes = [P(np.uint8, flags="C"), i64, i64, P(np.float32, flags="C")]
     _lib.affine_color.argtypes = [P(np.uint8, flags="C"), P(np.uint8, flags="C"), i64,
                                   P(np.float32, flags="C"), i32, f32]
+    _lib.mask_blend.argtypes = [P(np.uint8, flags="C"), P(np.uint8, flags="C"), P(np.uint8, flags="C"), i64]
     _lib.alpha_blend.argtypes = [P(np.uint8, flags="C"), i32, i32, P(np.uint8, flags="C"), i32, i32, i32, i32, f32]
     AVAILABLE = True
 
@@ -140,4 +141,15 @@ def alpha_blend(frame: np.ndarray, overlay: np.ndarray, x: int = 0, y: int = 0, 
     a = o[..., 3:4] / 255.0 * opacity
     d = frame[y + y0:y + y1, x + x0:x + x1]
     d[:] = np.clip(o[..., :3] * a + d * (1 - a) + 0.5, 0, 255).astype(np.uint8)
+    return frame
+
+
+def mask_blend(frame: np.ndarray, background: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Keep `frame` where mask=255, show `background` where mask=0 (in place on frame; RGB uint8, mask uint8)."""
+    if AVAILABLE and frame.flags.c_contiguous:
+        _lib.mask_blend(frame.reshape(-1), np.ascontiguousarray(background, np.uint8).reshape(-1),
+                        np.ascontiguousarray(mask, np.uint8).reshape(-1), frame.shape[0] * frame.shape[1])
+        return frame
+    a = mask[..., None].astype(np.float32) / 255.0
+    frame[:] = (frame * a + background * (1 - a) + 0.5).astype(np.uint8)
     return frame

@@ -132,8 +132,9 @@ def create_session(brief: Brief | dict, stats: dict[str, str] | list[str] | None
 class SessionRecorder:
     """Runs one recording for a session: live pipeline + samplers -> video + anchors. Used by the GUI."""
 
-    def __init__(self, session: Session, on_frame=None, on_stop_request=None) -> None:
+    def __init__(self, session: Session, on_frame=None, on_stop_request=None, carry: list[dict] | None = None) -> None:
         self.session = session
+        self.carry = carry or []  # effects that were on in preview
         self.on_frame = on_frame
         self.on_stop_request = on_stop_request
         self.pipe: LivePipeline | None = None
@@ -153,6 +154,8 @@ class SessionRecorder:
                                  min_silence=s.anchors.min_silence, silence_db=s.anchors.silence_db,
                                  scene_threshold=s.anchors.scene_threshold, on_stop_request=self.on_stop_request)
         self.pipe.start()
+        for spec in self.carry:  # keep what the user already set up in preview
+            self.pipe.command(dict(spec), source="carry")
         clock = self.pipe.clock
         if "input_activity" in s.anchors.stats and s.capture.mode != "test":
             self.samplers.append(InputActivitySampler(clock))

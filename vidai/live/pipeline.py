@@ -537,7 +537,8 @@ class LivePipeline:
         for p in list(self._probation):
             if now - p["t_done"] >= 20:
                 self._probation.remove(p)
-                if any(self.chain.get(n) is not None for n in p["names"]) or not p["names"]:
+                alive = [self.chain.get(n) for n in p["names"]]
+                if (not p["names"]) or any(q is not None and q.enabled for q in alive):
                     self.profile.add_macro(p["msg"], p["cmds"])
                     self._learned("macro", request=p["msg"])
 
@@ -619,6 +620,8 @@ class LivePipeline:
             if cls is None:
                 raise KeyError(f"unknown processor type {ptype!r}; known: {sorted(set(REGISTRY))}")
             p = self.chain.add(cls(c.get("name") or ptype, c.get("params", {}), c.get("enabled", True), until))
+            p.spec = {"cmd": "add", "name": p.name, "params": p.params,  # to carry it from preview into recording
+                      **({"file": c["file"]} if c.get("file") else {"type": ptype})}
             self.bus.publish("action", {"what": "processor_added", "name": p.name, "type": cls.__name__,
                                         "params": p.params, "until": until})
             return {"name": p.name}
@@ -762,6 +765,15 @@ class LivePipeline:
                 subprocess.Popen(["spd-say", "-r", "5", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError:
                 pass
+
+    def carry_specs(self) -> list[dict]:
+        """Lasting effects that are on now (added in preview) -> re-added when the recording starts."""
+        out = []
+        for p in self.chain.items:
+            spec = getattr(p, "spec", None)
+            if spec and p.enabled and p.until is None and not p.name.startswith("_"):
+                out.append({**spec, "params": dict(p.params)})
+        return out
 
     def status(self) -> dict:
         return {"t": round(self.clock(), 2), "frames": self.frames, "loop_ms": round(self.loop_ms, 2),

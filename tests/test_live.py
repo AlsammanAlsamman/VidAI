@@ -428,3 +428,31 @@ def test_obvious_request_acts_without_waiting(tmp_path):
     assert pl._req is not None  # unfinished sentence: still listening
     pl.stop()
     assert took < 0.5
+
+
+def test_preview_effects_carry_into_recording(tmp_path):
+    """Effects set up in preview are still there when the recording starts (new pipeline)."""
+    from vidai.session import SessionRecorder, create_session
+
+    s = create_session({"title": "c"}, capture=CaptureConfig(mode="test", out_height=360, mic=False), root=tmp_path,
+                       live={"stt": False, "speak": False})
+    prev = LivePipeline(s.capture, s.live, None, session_dir=s.dir)
+    prev.ctx.need_tracking = lambda: None
+    prev.start()
+    code = tmp_path / "tint.py"
+    code.write_text("from vidai.live.processors import LiveProcessor, register\n"
+                    "@register\nclass Tint(LiveProcessor):\n    def process(self, frame, t, ctx):\n        return frame\n")
+    prev.command({"cmd": "add", "name": "fx_tint", "file": str(code), "params": {"k": 2}})
+    prev.command({"cmd": "add", "name": "fx_crown_head", "type": "attach", "params": {"what": "👑", "to": "head"}})
+    prev.command({"cmd": "text", "text": "temporary", "for": 2})  # temporary: not carried
+    carry = prev.carry_specs()
+    prev.stop()
+    assert {c["name"] for c in carry} == {"fx_tint", "fx_crown_head"}
+    r = SessionRecorder(s, carry=carry)
+    r.pipe = None
+    r.start()
+    time.sleep(0.5)
+    names = [p.name for p in r.pipe.chain.items]
+    r.stop()
+    assert "fx_tint" in names and "fx_crown_head" in names
+    assert r.pipe.chain.get("fx_tint").params["k"] == 2
