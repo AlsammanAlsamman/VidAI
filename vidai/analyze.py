@@ -20,6 +20,12 @@ def _time_chunks(duration: float, workers: int, min_chunk: float = 10.0) -> list
     return list(zip(edges[:-1], edges[1:]))
 
 
+def _grid(c: tuple[float, float], rate: float) -> tuple[float, float, int]:
+    """Chunk -> (start, duration, samples) on the absolute sample grid, so chunk series join without drift."""
+    i0, i1 = int(round(c[0] * rate)), int(round(c[1] * rate))
+    return i0 / rate, (i1 - i0) / rate, i1 - i0
+
+
 def _fit(a: np.ndarray, n: int, fill: float) -> np.ndarray:
     if a.size >= n:
         return a[:n]
@@ -30,9 +36,10 @@ def audio_level(path: str, duration: float, workers: int = 3) -> Series:
     hop = int(_SR / AUDIO_RATE_HZ)
 
     def work(c: tuple[float, float]) -> np.ndarray:
-        s, e = c
-        n = int(round((e - s) * AUDIO_RATE_HZ))
-        pcm = ffmpeg.read_audio(path, _SR, start=s, duration=e - s)
+        s, d, n = _grid(c, AUDIO_RATE_HZ)
+        if n <= 0:
+            return np.empty(0, np.float32)
+        pcm = ffmpeg.read_audio(path, _SR, start=s, duration=d)
         return _fit(native.rms_db(pcm, hop), n, -90.0)
 
     with ThreadPoolExecutor(workers) as ex:
@@ -60,10 +67,11 @@ def motion(path: str, duration: float, workers: int = 3, fast: bool = False) -> 
     step = 1.0 / VIDEO_RATE_HZ
 
     def work(c: tuple[float, float]) -> np.ndarray:
-        s, e = c
-        n = int(round((e - s) * VIDEO_RATE_HZ))
+        s, d, n = _grid(c, VIDEO_RATE_HZ)
+        if n <= 0:
+            return np.empty(0, np.float32)
         pre = step if s > 0 else 0.0  # one frame overlap so cuts at chunk edges are seen
-        fr = ffmpeg.read_frames(path, VIDEO_RATE_HZ, start=s - pre, duration=e - s + pre, keyframes_only=fast)
+        fr = ffmpeg.read_frames(path, VIDEO_RATE_HZ, start=s - pre, duration=d + pre, keyframes_only=fast)
         d = native.frame_mad(fr)  # d[0] = 0, d[i] = |frame i - frame i-1|
         if pre:
             d = d[1:]

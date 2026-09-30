@@ -5,6 +5,7 @@ Claude builds a plan (JSON), inspects it, and renders it at the end. The source 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
@@ -85,6 +86,7 @@ class Chapter(BaseModel):
     op: Literal["chapter"] = "chapter"
     t: float
     title: str
+    auto: bool = False  # made by chapters_from_anchors (replaced when it runs again)
 
 
 class ApplyModel(BaseModel):
@@ -114,7 +116,9 @@ class EditPlan(BaseModel):
 
     def save(self, path: str | Path | None = None) -> Path:
         path = Path(path) if path else self.path_for(self.source)
-        path.write_text(self.model_dump_json(indent=1), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(self.model_dump_json(indent=1), encoding="utf-8")
+        os.replace(tmp, path)  # readers never see a half-written plan
         return path
 
     @classmethod
@@ -162,22 +166,29 @@ class EditPlan(BaseModel):
         return n
 
     def chapters_from_anchors(self, anchors: AnchorFile, titles: list[str] | None = None, min_len: float = 10.0) -> int:
-        """Chapter candidates from user section markers, then scene changes."""
+        """Chapter candidates from user section markers, then scene changes. Replaces the chapters a previous
+        call made; the min_len spacing is measured on the output timeline (after the cuts made so far)."""
         ts = [e.t for e in anchors.events_of("markers") if e.data.get("type") == "section"]
         if not ts:
             ts = [e.t for e in anchors.events_of("scene_change")]
+        self.ops = [o for o in self.ops if not (isinstance(o, Chapter) and o.auto)]
+        dur = self.duration or anchors.duration
+        timed = bool(self.duration)
+        out = self.map_time_after if timed else (lambda t: t)
+        total = self.output_duration() if timed else dur
         picked = [0.0]
         for t in sorted(ts):
-            if t - picked[-1] >= min_len and anchors.duration - t >= min_len:
+            if 0 < t < dur and out(t) - out(picked[-1]) >= min_len and total - out(t) >= min_len:
                 picked.append(t)
         for i, t in enumerate(picked):
             title = titles[i] if titles and i < len(titles) else ("Intro" if i == 0 else f"Part {i}")
-            self.ops.append(Chapter(t=round(t, 3), title=title))
+            self.ops.append(Chapter(t=round(t, 3), title=title, auto=True))
         return len(picked)
 
     # ---------- timeline ----------
     def keep_ranges(self) -> list[tuple[float, float]]:
-        cuts = sorted((max(0.0, c.start), min(self.duration, c.end)) for c in self.of(Cut) if c.end > c.start)
+        d = self.duration
+        cuts = sorted(r for c in self.of(Cut) if (r := (min(max(0.0, c.start), d), min(max(0.0, c.end), d)))[1] > r[0])
         merged: list[list[float]] = []
         for a, b in cuts:
             if merged and a <= merged[-1][1]:
@@ -191,7 +202,7 @@ class EditPlan(BaseModel):
             t = max(t, b)
         if t < self.duration:
             keeps.append((t, self.duration))
-        return [(round(a, 3), round(b, 3)) for a, b in keeps if b - a > 1e-3]
+        return [(round(a, 3), min(round(b, 3), d)) for a, b in keeps if b - a > 1e-3]
 
     def output_duration(self) -> float:
         return sum(b - a for a, b in self.keep_ranges())

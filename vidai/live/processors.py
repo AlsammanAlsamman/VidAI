@@ -61,6 +61,11 @@ class LiveProcessor:
         self.slow_frames = 0
         self.total_ms = 0.0
         self.calls = 0
+        self.closed = False
+
+    def close(self) -> None:
+        """Removed from the chain: stop worker threads and free models (subclasses extend this)."""
+        self.closed = True
 
     def configure(self, params: dict[str, Any]) -> None:
         self.params.update(params)
@@ -300,16 +305,32 @@ class ProcessorChain:
         if p.tracking:
             self.ctx.need_tracking()
         self.remove(p.name)
-        self.items.append(p)
-        self.items.sort(key=lambda q: q.stage)  # stable: transforms first, then overlays in insertion order
+        # copy-on-write: the frame loop iterates self.items without a lock, so never mutate it in place
+        self.items = sorted(self.items + [p], key=lambda q: q.stage)  # stable: transforms first, then overlays
         if p.listens:
-            self.ctx.bus.subscribe(lambda ev, p=p: p in self.items and p.on_event(ev, self.ctx), p.listens)
+            p._sub = self.ctx.bus.subscribe(lambda ev, p=p: p.on_event(ev, self.ctx), p.listens)
         return p
 
     def remove(self, name: str) -> bool:
-        n = len(self.items)
+        gone = [p for p in self.items if p.name == name]
         self.items = [p for p in self.items if p.name != name]
-        return len(self.items) != n
+        for p in gone:
+            self._close(p)
+        return bool(gone)
+
+    def _close(self, p: LiveProcessor) -> None:
+        if getattr(p, "_sub", None) is not None:
+            self.ctx.bus.unsubscribe(p._sub)
+            p._sub = None
+        try:
+            p.close()
+        except Exception as e:
+            self.ctx.bus.publish("error", {"processor": p.name, "where": "close", "error": repr(e)[:200]})
+
+    def close_all(self) -> None:
+        """The pipeline stopped: stop every processor's workers (the list stays for status/summary)."""
+        for p in self.items:
+            self._close(p)
 
     def get(self, name: str) -> LiveProcessor | None:
         return next((p for p in self.items if p.name == name), None)

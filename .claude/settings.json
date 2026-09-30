@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "mcp__vidai"
+    ],
+    "ask": [
+      "mcp__vidai__vidai_confirmed_action"
     ]
   }
 }

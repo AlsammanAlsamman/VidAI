@@ -36,7 +36,7 @@ class Background(LiveProcessor):
         except Exception:
             step = self._mediapipe()  # fallback
         last = 0.0
-        while True:
+        while not self.closed:  # removed from the chain -> the thread and its model go away
             rate = self.params["rate"] / (1 + getattr(self, "_quality", 0))  # slower under load (governor)
             wait = 1.0 / rate - (time.monotonic() - last)
             if wait > 0:
@@ -52,6 +52,7 @@ class Background(LiveProcessor):
 
     def _rvm(self):
         import onnxruntime as ort
+
         from vidai.models_dl import ensure
 
         so = ort.SessionOptions()
@@ -72,6 +73,7 @@ class Background(LiveProcessor):
     def _mediapipe(self):
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions, vision
+
         from vidai.models_dl import ensure
 
         seg = vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(

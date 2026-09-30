@@ -60,15 +60,30 @@ class MediaInfo:
     sample_rate: int = 0
 
 
+def _scan_duration(path: str) -> float:
+    """Duration by reading every packet (no decoding), for files whose header has none."""
+    proc = subprocess.run([ffmpeg_exe(), "-hide_banner", "-nostdin", "-i", path, "-map", "0", "-c", "copy",
+                           "-f", "null", "-"], capture_output=True, text=True)
+    ts = re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", proc.stderr)
+    dur = int(ts[-1][0]) * 3600 + int(ts[-1][1]) * 60 + float(ts[-1][2]) if ts else 0.0
+    if dur <= 0:
+        raise FFmpegError(f"cannot probe {path}: the file has no duration and no readable packets "
+                          f"(damaged or empty recording?)\n{proc.stderr[-1000:]}")
+    return dur
+
+
 def probe(path: str) -> MediaInfo:
     """Read basic media info from `ffmpeg -i` output (ffprobe is not always available)."""
     proc = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", path], capture_output=True, text=True)
     err = proc.stderr
     m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", err)
-    if not m:
+    if m:
+        h, mi, s = m.groups()
+        info = MediaInfo(duration=int(h) * 3600 + int(mi) * 60 + float(s))
+    elif "Duration: N/A" in err:  # e.g. a recording that crashed before its index/duration was written
+        info = MediaInfo(duration=_scan_duration(path))
+    else:
         raise FFmpegError(f"cannot probe {path}:\n{err[-1000:]}")
-    h, mi, s = m.groups()
-    info = MediaInfo(duration=int(h) * 3600 + int(mi) * 60 + float(s))
     v = re.search(r"Stream #.*Video:.*?(\d{2,5})x(\d{2,5}).*?(\d+(?:\.\d+)?) fps", err)
     if v:
         info.has_video = True

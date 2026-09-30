@@ -1,12 +1,10 @@
 """Model hub: catalog search, real model adapters, permission-gated install, colour from a photo."""
-import os
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from vidai import hub
+from vidai import hub, models_dl
 from vidai.capture import CaptureConfig
 from vidai.live.bus import LiveBus
 from vidai.live.pipeline import LiveConfig, LivePipeline
@@ -86,6 +84,7 @@ def test_model_command_asks_permission_downloads_and_applies(tmp_path, monkeypat
                                               "url": fake.as_uri(), "file": "fake_model.bin", "mb": 0.005,
                                               "license": "MIT", "words": ["fake"], "does": "test"})
     monkeypatch.setattr(hub, "hub_dir", lambda: tmp_path / "hub")
+    monkeypatch.setattr(models_dl, "check_url", lambda url: None)  # a local file:// "download"
     (tmp_path / "hub").mkdir()
     pl = LivePipeline(CaptureConfig(mode="test", out_height=360, mic=False), LiveConfig(stt=False, speak=False),
                       None, session_dir=tmp_path)

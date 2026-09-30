@@ -101,7 +101,6 @@ def default_capture(brief: Brief) -> CaptureConfig:
 
 
 def default_live(brief: Brief, capture: CaptureConfig) -> LiveConfig:
-    langs = brief.languages
     # English only for now (reliable wake word + commands); set stt_language="ar" / None to change
     return LiveConfig(stt=capture.mic, stt_language="en", stt_languages=["en"],
                       ocr=capture.mode in ("screen", "screen+camera"))
@@ -153,6 +152,7 @@ class SessionRecorder:
         self.pipe = LivePipeline(s.capture, s.live, s.video_path, s.dir, on_frame=self.on_frame,
                                  min_silence=s.anchors.min_silence, silence_db=s.anchors.silence_db,
                                  scene_threshold=s.anchors.scene_threshold, on_stop_request=self.on_stop_request)
+        self._seq0 = self.pipe.bus._seq  # events before this (preview) are not part of the recording
         self.pipe.start()
         for spec in self.carry:  # keep what the user already set up in preview
             self.pipe.command(dict(spec), source="carry")
@@ -228,7 +228,7 @@ class SessionRecorder:
             if series is not None:
                 a.series[smp.stat] = series
         # everything that happened live becomes anchors
-        live = read_events(Path(s.dir) / "live.jsonl", limit=10 ** 9)
+        live = read_events(Path(s.dir) / "live.jsonl", getattr(self, "_seq0", 0), limit=10 ** 9)
         a.add_events([Event(t=e["t"], kind="markers", data=e["data"]) for e in live if e["kind"] == "marker"])
         a.add_segments([Segment(start=e["data"]["start"], end=e["data"]["end"], kind="speech",
                                 data={"text": e["data"]["text"], "lang": e["data"].get("lang"),

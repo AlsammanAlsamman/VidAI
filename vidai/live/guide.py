@@ -95,8 +95,12 @@ vidai_create_file(relpath, content, session, reason).
 - ask mode (default): VidAI says "Master, I need to install rembg to remove the background. Say VidAI confirm,
   or VidAI deny." and shows Confirm / Deny in the window; the call returns done / denied / no_answer.
 - full mode: the user said "VidAI, take all actions" -> runs at once ("VidAI, ask me first" switches back).
-Installs go only into VidAI's own Python; files only under ~/.vidai or the session; all logged in
-~/.vidai/actions.log.""",
+  Only the user can give it (voice with the wake word, typing, or `vidai permissions full`); it expires.
+  Claude's commands can never confirm/deny or switch full access on.
+- no recorder open: needs_confirmation -> vidai_confirmed_action (Claude Code asks the user).
+- effect code: the first live_processor of a session asks "run effect code written by Claude?" once.
+Downloads: https from public hosts only (pass sha256 when known). Installs go only into VidAI's own Python;
+files only under ~/.vidai or a real session folder; all logged in ~/.vidai/actions.log.""",
 
 "hub": """Small open models with ready adapters (vidai.hub) — use them before writing code:
 model_search("show my mood") -> catalog ids; model_apply(session, "emotion"|"gestures"|"anime"|"style_mosaic"|

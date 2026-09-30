@@ -81,21 +81,45 @@ class ModelSpec:
     created: str = ""
 
 
+def _model_dir(name: str) -> Path:
+    from ..actions import safe_name
+
+    return models_dir() / safe_name(name, "model name")
+
+
+def _code_file_ok(file: Path) -> bool:
+    """Model code runs only from VidAI's own folders: ~/.vidai (workspace, registry) or a session folder."""
+    f = file.expanduser().resolve()
+    if vidai_home().resolve() in f.parents:
+        return True
+    return any((d / "session.json").is_file() for d in f.parents)
+
+
 def _import_class(class_path: str, model_dir: Path | None = None) -> type[LabModel]:
     mod_name, _, cls_name = class_path.partition(":")
     if mod_name.endswith(".py"):
         file = (model_dir / mod_name) if model_dir else Path(mod_name)
+        if model_dir and model_dir.resolve() not in file.resolve().parents:
+            raise ValueError(f"model code {mod_name!r} is outside {model_dir}")
+        if not model_dir and not _code_file_ok(file):
+            raise ValueError(f"model code must be in ~/.vidai (e.g. created with vidai_create_file) or a session "
+                             f"folder, not {file}")
         spec = importlib.util.spec_from_file_location(f"vidai_lab_{file.parent.name}", file)
         module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
         sys.modules[spec.name] = module  # type: ignore[union-attr]
         spec.loader.exec_module(module)  # type: ignore[union-attr]
     else:
+        if mod_name != "vidai" and not mod_name.startswith("vidai."):
+            raise ValueError(f"only vidai.* modules or a model .py file, not {mod_name!r}")
         module = importlib.import_module(mod_name)
-    return getattr(module, cls_name)
+    cls = getattr(module, cls_name)
+    if not (isinstance(cls, type) and issubclass(cls, LabModel)):
+        raise TypeError(f"{class_path} is not a LabModel")
+    return cls
 
 
 def save_model(model: LabModel, spec: ModelSpec, code_file: str | Path | None = None) -> Path:
-    d = models_dir() / spec.name
+    d = _model_dir(spec.name)
     d.mkdir(parents=True, exist_ok=True)
     if code_file:
         shutil.copy(code_file, d / "model.py")
@@ -107,7 +131,7 @@ def save_model(model: LabModel, spec: ModelSpec, code_file: str | Path | None = 
 
 
 def load_model(name: str) -> tuple[LabModel, ModelSpec]:
-    d = models_dir() / name
+    d = _model_dir(name)
     if not (d / "spec.json").exists():
         raise KeyError(f"model '{name}' not found in {models_dir()}")
     spec = ModelSpec(**json.loads((d / "spec.json").read_text()))
@@ -130,7 +154,10 @@ def list_models() -> list[dict[str, Any]]:
 
 
 def delete_model(name: str) -> None:
-    shutil.rmtree(models_dir() / name)
+    d = _model_dir(name)
+    if not (d / "spec.json").exists():
+        raise KeyError(f"model '{name}' not found in {models_dir()}")
+    shutil.rmtree(d)
 
 
 def _meets(metrics: dict[str, float], metric: str, target: float, higher_is_better: bool) -> bool:

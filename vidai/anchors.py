@@ -12,6 +12,7 @@ All times are seconds in the *source* video timeline.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -134,7 +135,9 @@ class AnchorFile(BaseModel):
 
     def save(self, path: str | Path | None = None) -> Path:
         path = Path(path) if path else self.path_for(self.video)
-        path.write_text(self.model_dump_json(indent=1, exclude_none=True), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(self.model_dump_json(indent=1, exclude_none=True), encoding="utf-8")
+        os.replace(tmp, path)  # readers never see a half-written file
         return path
 
     @classmethod

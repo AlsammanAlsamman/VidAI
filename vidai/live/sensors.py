@@ -302,6 +302,7 @@ class SpeechToText:
         'VidAI' <pause> 'zoom in' as one command)."""
         if not text or re.fullmatch(r"[\W_]*", text) or is_hallucination(text):
             return
+        raw = parse_command(text, self.wake_words)  # what was really said, before learned corrections
         if getattr(self, "profile", None) is not None:
             text = self.profile.correct(text)
         cmd = parse_command(text, self.wake_words)
@@ -320,7 +321,9 @@ class SpeechToText:
         self.transcripts.append(ev)
         self.bus.publish("transcript", ev, end)
         if cmd:
-            self.bus.publish("voice_command", {**cmd, "text": text}, end)
+            # "wake": the user really said "VidAI <this command>" (needed for full access)
+            wake = bool(raw and raw["command"] == cmd["command"])
+            self.bus.publish("voice_command", {**cmd, "text": text, "wake": wake}, end)
 
     def flush(self, timeout: float = 30.0) -> None:
         """Wait until queued utterances are transcribed (at the end of a recording)."""
@@ -331,9 +334,15 @@ class SpeechToText:
             time.sleep(0.1)
         time.sleep(0.2)
 
-    def close(self) -> None:
-        self.q.put(None)
-        self._th.join(10)
+    def close(self, wait: bool = True) -> None:
+        try:
+            self.q.put_nowait(None)
+        except queue.Full:
+            with self.q.mutex:
+                self.q.queue.clear()
+            self.q.put_nowait(None)
+        if wait:
+            self._th.join(10)
 
 
 # ---------------- on-screen text ----------------

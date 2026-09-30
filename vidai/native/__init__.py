@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -21,6 +22,18 @@ AVAILABLE = False
 BUILD_ERROR: str | None = None
 
 
+def _cpu_id() -> bytes:
+    """Machine + CPU feature flags: the .so is built with -march=native, so it must not be reused elsewhere."""
+    ident = platform.machine()
+    try:
+        for line in Path("/proc/cpuinfo").read_text(errors="replace").splitlines():
+            if line.split(":")[0].strip() in ("flags", "Features", "model name", "CPU part"):
+                ident += "|" + line
+    except OSError:
+        ident += "|" + platform.processor()
+    return ident.encode()
+
+
 def _build() -> ctypes.CDLL | None:
     global BUILD_ERROR
     if os.environ.get("VIDAI_NO_NATIVE"):
@@ -31,7 +44,7 @@ def _build() -> ctypes.CDLL | None:
         BUILD_ERROR = "no C compiler found"
         return None
     src = _SRC.read_bytes()
-    tag = hashlib.sha1(src + cc.encode()).hexdigest()[:12]
+    tag = hashlib.sha1(src + cc.encode() + _cpu_id()).hexdigest()[:12]
     home = Path(os.environ.get("VIDAI_HOME", Path.home() / ".vidai"))
     out = home / "native" / f"fastops_{tag}.so"
     if not out.exists():
@@ -78,8 +91,26 @@ def _load() -> None:
 _load()
 
 
+def _image(a, name: str, channels: int | None = 3, dtype=np.uint8) -> np.ndarray:
+    """Check an image array before it reaches C: ndarray, dtype, (H, W, channels) or (H, W) if channels is None."""
+    if not isinstance(a, np.ndarray):
+        raise ValueError(f"{name} must be a numpy array, got {type(a).__name__}")
+    if dtype is not None and a.dtype != dtype:
+        raise ValueError(f"{name} must be {np.dtype(dtype).name}, got {a.dtype}")
+    if channels is None:
+        ok = a.ndim == 2 or (a.ndim == 3 and a.shape[2] == 1)
+    else:
+        ok = a.ndim == 3 and a.shape[2] == channels
+    if not ok:
+        want = "(H, W)" if channels is None else f"(H, W, {channels})"
+        raise ValueError(f"{name} must have shape {want}, got {a.shape}")
+    return a
+
+
 def rms_db(pcm: np.ndarray, hop: int) -> np.ndarray:
-    pcm = np.ascontiguousarray(pcm, np.float32)
+    if int(hop) <= 0:
+        raise ValueError(f"hop must be > 0, got {hop}")
+    pcm = np.ascontiguousarray(pcm, np.float32).reshape(-1)
     m = pcm.size // hop
     if AVAILABLE:
         out = np.empty(m, np.float32)
@@ -91,7 +122,7 @@ def rms_db(pcm: np.ndarray, hop: int) -> np.ndarray:
 
 
 def find_runs(x: np.ndarray, thr: float, below: bool = True, min_len: int = 1) -> list[tuple[int, int]]:
-    x = np.ascontiguousarray(x, np.float32)
+    x = np.ascontiguousarray(x, np.float32).reshape(-1)
     if AVAILABLE:
         cap = x.size // 2 + 1
         s, e = np.empty(cap, np.int64), np.empty(cap, np.int64)
@@ -105,6 +136,8 @@ def find_runs(x: np.ndarray, thr: float, below: bool = True, min_len: int = 1) -
 
 def frame_mad(frames: np.ndarray) -> np.ndarray:
     frames = np.ascontiguousarray(frames, np.uint8)
+    if frames.ndim < 2:
+        raise ValueError(f"frames must be (n, H, W[, C]), got shape {frames.shape}")
     n = frames.shape[0]
     size = int(np.prod(frames.shape[1:])) if n else 0
     if AVAILABLE:
@@ -123,18 +156,26 @@ def affine_color(frame: np.ndarray, W: np.ndarray, degree: int = 1, strength: fl
     if not AVAILABLE:
         return None
     src = np.ascontiguousarray(frame, np.uint8)
+    if src.ndim < 2 or src.shape[-1] != 3:
+        raise ValueError(f"frame must be RGB (..., 3), got shape {src.shape}")
+    Wf = np.ascontiguousarray(W, np.float32).reshape(-1)
+    need = 21 if degree >= 2 else 12
+    if Wf.size != need:
+        raise ValueError(f"W must have {need // 3}x3 values for degree {degree}, got {np.shape(W)}")
     out = np.empty_like(src)
-    _lib.affine_color(src.reshape(-1), out.reshape(-1), src.size // 3,
-                      np.ascontiguousarray(W, np.float32).reshape(-1), int(degree), float(strength))
+    _lib.affine_color(src.reshape(-1), out.reshape(-1), src.size // 3, Wf, int(degree), float(strength))
     return out
 
 
 def alpha_blend(frame: np.ndarray, overlay: np.ndarray, x: int = 0, y: int = 0, opacity: float = 1.0) -> np.ndarray:
     """Blend an RGBA overlay onto an RGB uint8 frame in place (clipped at the edges). Returns the frame."""
+    _image(frame, "frame", 3)
+    _image(overlay, "overlay", 4)
     fh, fw = frame.shape[:2]
     oh, ow = overlay.shape[:2]
-    if AVAILABLE and frame.flags.c_contiguous:
-        ov = np.ascontiguousarray(overlay, np.uint8)
+    x, y = int(x), int(y)
+    if AVAILABLE and frame.flags.c_contiguous and abs(x) < 2 ** 30 and abs(y) < 2 ** 30:
+        ov = np.ascontiguousarray(overlay)
         _lib.alpha_blend(frame.reshape(-1), fw, fh, ov.reshape(-1), ow, oh, int(x), int(y), float(opacity))
         return frame
     x0, y0, x1, y1 = max(0, -x), max(0, -y), min(ow, fw - x), min(oh, fh - y)
@@ -149,24 +190,31 @@ def alpha_blend(frame: np.ndarray, overlay: np.ndarray, x: int = 0, y: int = 0, 
 
 def mask_blend(frame: np.ndarray, background: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Keep `frame` where mask=255, show `background` where mask=0 (in place on frame; RGB uint8, mask uint8)."""
+    _image(frame, "frame", 3)
+    if np.shape(background) != frame.shape:
+        raise ValueError(f"background must have the frame's shape {frame.shape}, got {np.shape(background)}")
+    if np.shape(mask)[:2] != frame.shape[:2] or np.ndim(mask) not in (2, 3) or np.size(mask) != frame.size // 3:
+        raise ValueError(f"mask must have shape {frame.shape[:2]}, got {np.shape(mask)}")
     if AVAILABLE and frame.flags.c_contiguous:
         _lib.mask_blend(frame.reshape(-1), np.ascontiguousarray(background, np.uint8).reshape(-1),
                         np.ascontiguousarray(mask, np.uint8).reshape(-1), frame.shape[0] * frame.shape[1])
         return frame
-    a = mask[..., None].astype(np.float32) / 255.0
+    a = np.asarray(mask).reshape(frame.shape[:2])[..., None].astype(np.float32) / 255.0
     frame[:] = (frame * a + background * (1 - a) + 0.5).astype(np.uint8)
     return frame
 
 
 def lut3x3(frame: np.ndarray, T: np.ndarray) -> np.ndarray:
     """out_c = clamp(sum_ch T[c, ch, in_ch]) for an RGB uint8 frame, IN PLACE. T: (3, 3, 256) float32, 0..255 scale."""
+    _image(frame, "frame", 3)
     T = np.ascontiguousarray(T, np.float32)
+    if T.shape != (3, 3, 256):
+        raise ValueError(f"T must have shape (3, 3, 256), got {T.shape}")
     if AVAILABLE and frame.flags.c_contiguous:
         buf = frame.reshape(-1)
         _lib.lut3x3(buf, buf, frame.shape[0] * frame.shape[1], T.reshape(-1))
         return frame
     f = frame.reshape(-1, 3)
-    out = T[0, 0][f[:, 0]] * 0  # NumPy fallback
     res = np.stack([T[c, 0][f[:, 0]] + T[c, 1][f[:, 1]] + T[c, 2][f[:, 2]] for c in range(3)], axis=1)
     frame[:] = np.clip(res + 0.5, 0, 255).astype(np.uint8).reshape(frame.shape)
     return frame

@@ -1,6 +1,8 @@
 """High-level operations returning JSON-friendly dicts. Shared by the MCP server and the CLI."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 from pathlib import Path
 from typing import Any
 
@@ -8,26 +10,41 @@ import numpy as np
 
 from . import lab, preview
 from .analyze import analyze
-from .anchors import STATS, AnchorFile, Event, list_stats, select_stats
+from .anchors import AnchorFile, Event, list_stats, select_stats
 from .brief import QUESTIONS, Brief
-from .edit import EditPlan, new_plan
+from .edit import EditPlan, Op, new_plan
 from .export import youtube_package
 from .render import render
 
 _recorder = None
 
 
+@contextlib.contextmanager
+def _locked(path: str | Path):
+    """Serialize load-modify-save of a sidecar file (parallel tool calls must not lose each other's edits)."""
+    lock = Path(str(path) + ".lock")
+    with open(lock, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 # ---------- brief ----------
 def brief_questions() -> dict:
+    """The questions to ask the user before recording (topic, audience, style, language, extras...)."""
     return {"questions": QUESTIONS, "styles_note": "style decides which stats are useful"}
 
 
 def save_brief(path: str, brief: dict) -> dict:
+    """Save the user's answers as brief.json; returns the stats suggested for this kind of video."""
     b = Brief(**brief)
     return {"saved": str(b.save(path)), "suggested_stats": select_stats(b)}
 
 
 def suggest_stats(brief: dict | None = None) -> dict:
+    """Anchor stats suggested for a brief, plus every stat available (to choose the anchor config)."""
     b = Brief(**(brief or {}))
     return {"suggested": select_stats(b),
             "all": {s.name: {"description": s.description, "source": s.source, "kind": s.kind,
@@ -187,9 +204,20 @@ def live_control(session: str, commands: list[dict], wait: float = 3.0, done: bo
 def live_processor(session: str, name: str, code: str, params: dict | None = None, duration: float | None = None,
                    wait: float = 4.0, done: bool = True, save_as: str | None = None, description: str = "") -> dict:
     """Write a processor (Python code, see live_guide('processors')) and load it into the running recorder.
-    Replaces a processor with the same name. Returns the ack or the error to fix."""
+    Replaces a processor with the same name. Returns the ack or the error to fix.
+    The first time in a session VidAI asks the user to allow effect code written by Claude (unless full access)."""
+    from . import actions
     from .live.bus import read_events
 
+    actions.safe_name(name, "processor name")
+    if save_as:
+        actions.safe_name(save_as, "library name")
+    session = str(actions.session_dir(session))
+    if not actions.code_allowed(session):
+        st = _ask_in_recorder(session, f"run effect code written by Claude ({name})")
+        if st != "approved":
+            return {"status": st, "error": "the user did not allow Claude's effect code in this session"}
+        actions.allow_code(session)
     last = read_events(_live_log(session), 0, None, 1)
     seq0 = last[-1]["seq"] if last else 0  # only errors of *this* version count
     d = Path(session) / "processors"
@@ -287,6 +315,13 @@ def live_effect(session: str, name: str, params: dict | None = None, instance: s
     """Add a saved library effect (see live_effects) to the running recorder — no code needed."""
     import json
 
+    from .actions import safe_name
+
+    safe_name(name, "effect name")
+    if instance:
+        safe_name(instance, "instance name")
+    if not (_library() / f"{name}.json").exists():
+        raise ValueError(f"no saved effect {name!r}; see live_effects")
     meta = json.loads((_library() / f"{name}.json").read_text())
     cmd = {"cmd": "add", "name": instance or f"fx_{name}", "file": str(_library() / f"{name}.py"),
            "params": {**meta.get("params", {}), **(params or {})}}
@@ -301,45 +336,38 @@ def _recorder_alive(session: str | None) -> bool:
 
     try:
         st = Session.load(session).status
-    except OSError:
+    except (OSError, ValueError):  # no or broken session.json
         return False
     return st.state in ("ready", "recording") and pid_alive(st.gui_pid)
 
 
-def vidai_action(action: str, args: dict, session: str | None = None, reason: str = "",
-                 confirmed: bool = False, timeout: float = 90) -> dict:
-    """Let VidAI itself install / download / create (action = install | download | create_file).
-    Full-access session ("VidAI, take all actions") -> runs at once. Otherwise VidAI asks the user out loud
-    in the recorder ("Master, I need to ...") and waits for "VidAI confirm/deny". Outside a recording, returns
-    needs_confirmation: ask the user in chat, then call again with confirmed=True."""
+def _ask_in_recorder(session: str, what: str, timeout: float = 90) -> str:
+    """VidAI asks the user out loud in the recorder; returns approved | denied | no_answer | no_recorder."""
     import time as _t
     import uuid
 
-    from . import actions
     from .live.bus import read_events
 
-    what = actions.describe(action, args) + (f" to {reason}" if reason else "")
-    mode = actions.get_mode(session) if session else "ask"
-    if not (confirmed or mode == "full"):
-        if not _recorder_alive(session):
-            return {"status": "needs_confirmation", "ask_user": f"VidAI needs to {what}. Allow?",
-                    "then": "call again with confirmed=True if the user agrees"}
-        rid = uuid.uuid4().hex[:8]
-        before = read_events(_live_log(session), 0, None, 1)
-        seq0 = before[-1]["seq"] if before else 0
-        live_control(session, [{"cmd": "ask", "id_ask": rid, "text": what}], done=False)
-        end = _t.time() + timeout
-        decision = None
-        while _t.time() < end and decision is None:
-            for e in read_events(_live_log(session), seq0, ["permission"], 10 ** 6):
-                if e["data"].get("request") == rid:
-                    decision = e["data"]
-            _t.sleep(0.2)
-        if decision is None:
-            return {"status": "no_answer", "asked": what}
-        if decision["state"] != "approved":
-            actions.log("denied", requested=action, what=what)
-            return {"status": "denied", "asked": what}
+    if not _recorder_alive(session):
+        return "no_recorder"
+    rid = uuid.uuid4().hex[:8]
+    before = read_events(_live_log(session), 0, None, 1)
+    seq0 = before[-1]["seq"] if before else 0
+    live_control(session, [{"cmd": "ask", "id_ask": rid, "text": what}], done=False)
+    end = _t.time() + timeout
+    while _t.time() < end:
+        for e in read_events(_live_log(session), seq0, ["permission"], 10 ** 6):
+            if e["data"].get("request") == rid:
+                return "approved" if e["data"]["state"] == "approved" else "denied"
+        _t.sleep(0.2)
+    return "no_answer"
+
+
+def _run_action(action: str, args: dict, session: str | None, mode: str, by: str) -> dict:
+    from . import actions
+
+    if action not in actions.RUN or action == "model":
+        raise ValueError(f"unknown action {action!r}: install | download | create_file")
     a = dict(args)
     if action == "create_file" and session and "session" not in a:
         a["session"] = session
@@ -347,36 +375,71 @@ def vidai_action(action: str, args: dict, session: str | None = None, reason: st
         result = actions.RUN[action](a)
     except Exception as e:
         return {"status": "failed", "error": str(e)[:500]}
-    return {"status": "done", "mode": mode, **result}
+    return {"status": "done", "mode": mode, "approved_by": by, **result}
 
 
-def vidai_install(packages: list[str], session: str | None = None, reason: str = "",
-                  confirmed: bool = False) -> dict:
+def vidai_action(action: str, args: dict, session: str | None = None, reason: str = "",
+                 timeout: float = 90) -> dict:
+    """Let VidAI itself install / download / create (action = install | download | create_file).
+    Full-access session ("VidAI, take all actions") -> runs at once. Otherwise VidAI asks the user out loud
+    in the recorder ("Master, I need to ...") and waits for "VidAI confirm/deny". Outside a recording, returns
+    needs_confirmation: then use vidai_confirmed_action (Claude Code shows the user a permission prompt)."""
+    from . import actions
+
+    what = actions.describe(action, args) + (f" to {reason}" if reason else "")
+    mode = actions.get_mode(session) if session else "ask"
+    if mode == "full":
+        return _run_action(action, args, session, mode, "full_access")
+    st = _ask_in_recorder(session, what, timeout) if session else "no_recorder"
+    if st == "no_recorder":
+        return {"status": "needs_confirmation", "ask_user": f"VidAI needs to {what}. Allow?",
+                "then": "call vidai_confirmed_action with the same action/args; Claude Code will ask the user"}
+    if st != "approved":
+        actions.log("denied" if st == "denied" else "no_answer", requested=action, what=what)
+        return {"status": st, "asked": what}
+    return _run_action(action, args, session, mode, "user_in_recorder")
+
+
+def vidai_confirmed_action(action: str, args: dict, session: str | None = None, reason: str = "") -> dict:
+    """Run an install / download / create_file the user approved in Claude Code's permission prompt.
+    Only for when vidai_action returned needs_confirmation (no recorder open). This tool must never be
+    auto-allowed in Claude Code settings: its permission prompt IS the user's consent."""
+    from . import actions
+
+    actions.log("confirmed_in_claude_code", requested=action, reason=reason)
+    return _run_action(action, args, session, actions.get_mode(session) if session else "ask", "claude_code_prompt")
+
+
+def vidai_install(packages: list[str], session: str | None = None, reason: str = "") -> dict:
     """VidAI installs Python packages into its own environment (asks the user first unless full access)."""
-    return vidai_action("install", {"packages": packages}, session, reason, confirmed)
+    return vidai_action("install", {"packages": packages}, session, reason)
 
 
 def vidai_download(url: str, name: str | None = None, session: str | None = None, reason: str = "",
-                   confirmed: bool = False) -> dict:
-    """VidAI downloads a file into ~/.vidai/work/downloads (asks the user first unless full access)."""
-    return vidai_action("download", {"url": url, "name": name}, session, reason, confirmed)
+                   sha256: str | None = None) -> dict:
+    """VidAI downloads an https file into ~/.vidai/work/downloads (asks the user first unless full access).
+    Pass sha256 when the source publishes one."""
+    return vidai_action("download", {"url": url, "name": name, "sha256": sha256}, session, reason)
 
 
-def vidai_create_file(relpath: str, content: str, session: str | None = None, reason: str = "",
-                      confirmed: bool = False) -> dict:
+def vidai_create_file(relpath: str, content: str, session: str | None = None, reason: str = "") -> dict:
     """VidAI creates a file in the session folder (or ~/.vidai/work) (asks first unless full access)."""
-    return vidai_action("create_file", {"relpath": relpath, "content": content}, session, reason, confirmed)
+    return vidai_action("create_file", {"relpath": relpath, "content": content}, session, reason)
 
 
 def vidai_permissions(session: str | None = None, mode: str | None = None) -> dict:
-    """Show (or set, with the user's consent: 'ask' | 'full') the permission mode, plus recent actions."""
+    """Show the permission mode and recent actions. mode='ask' turns full access off. Full access can only be
+    given by the user: "VidAI, take all actions" in the recorder, or `vidai permissions full` in a terminal."""
     from . import actions
 
-    if mode in ("ask", "full"):
+    if mode == "full":
+        raise ValueError("only the user can give full access: say 'VidAI, take all actions' in the recorder "
+                         "or run `vidai permissions full` in a terminal")
+    if mode == "ask":
         if _recorder_alive(session):
-            live_control(session, [{"cmd": "mode", "mode": mode}], done=False)
+            live_control(session, [{"cmd": "mode", "mode": "ask"}], done=False)
         else:
-            actions.set_mode(session, mode)
+            actions.set_mode(session, "ask")
     log = actions.home() / "actions.log"
     recent = log.read_text(encoding="utf-8").splitlines()[-10:] if log.exists() else []
     return {"mode": actions.get_mode(session), "recent_actions": recent}
@@ -504,6 +567,7 @@ def live_status(session: str) -> dict:
 # ---------- recording with OBS (optional backend) ----------
 def record_start(brief_path: str | None = None, stats: list[str] | None = None, host: str = "localhost",
                  port: int = 4455, password: str = "") -> dict:
+    """Legacy OBS backend (CLI / Python only; Claude uses studio_start)."""
     global _recorder
     from .recorder import Recorder
 
@@ -543,7 +607,10 @@ def analyze_video(video: str, stats: list[str] | None = None, workers: int = 3,
 
 
 def anchors(video: str, mode: str = "summary", t: float = 0.0, kind: str | None = None,
-            t0: float = 0.0, t1: float | None = None) -> dict:
+            t0: float = 0.0, t1: float | None = None, workers: int = 3) -> dict:
+    """Query a video's anchors. mode: summary (start here) | at (everything at time t) |
+    segments / events (optionally of `kind`, within t0..t1) | series (a stat's values, kind='audio_level'...) |
+    chunks (safe split points for `workers` parallel chunks)."""
     a = AnchorFile.load(video)
     if mode == "summary":
         return a.summary()
@@ -555,29 +622,34 @@ def anchors(video: str, mode: str = "summary", t: float = 0.0, kind: str | None 
     if mode == "events":
         return {"events": [e.model_dump() for e in a.events_of(kind, t0, t1)]}
     if mode == "series":
+        if (kind or "audio_level") not in a.series:
+            raise ValueError(f"no series {kind!r}; available: {sorted(a.series)}")
         s = a.series[kind or "audio_level"]
         w = s.window(t0, t1 if t1 is not None else a.duration)
         return {"rate_hz": s.rate_hz, "t0": t0, "values": [round(float(x), 3) for x in w]}
     if mode == "chunks":
-        return {"chunks": a.chunks(int(t) or 3)}
-    raise ValueError(f"unknown mode {mode}")
+        return {"chunks": a.chunks(workers)}
+    raise ValueError(f"unknown mode {mode!r}: summary | at | segments | events | series | chunks")
 
 
 def add_anchor_events(video: str, events: list[dict]) -> dict:
     """Let Claude (or a lab model) write its own anchors, e.g. 'topic_start' at 12.4 s."""
-    a = AnchorFile.load(video)
     evs = [Event(**e) for e in events]
-    a.add_events(evs, replace_kinds=False)
-    a.save()
+    with _locked(AnchorFile.path_for(video)):
+        a = AnchorFile.load(video)
+        a.add_events(evs, replace_kinds=False)
+        a.save()
     return {"added": len(evs)}
 
 
 # ---------- previews ----------
 def frame(video: str, t: float, out: str | None = None, width: int = 640) -> dict:
+    """One frame at source time t as a PNG (look at it with your image reader)."""
     return {"image": str(preview.frame(video, t, out, width))}
 
 
 def contact_sheet(video: str, times: list[float], out: str | None = None, cols: int = 4) -> dict:
+    """Several frames (at `times`) in one labelled PNG grid: the cheap way to look at many moments."""
     return {"image": str(preview.contact_sheet(video, times, out, cols))}
 
 
@@ -587,37 +659,56 @@ def _plan(video: str) -> EditPlan:
     return EditPlan.load(p) if p.exists() else new_plan(video)
 
 
-def plan(video: str, action: str = "show", ops: list[dict] | None = None, index: int | None = None,
+def plan(video: str, action: str = "show", ops: list[Op] | None = None, index: int | list[int] | None = None,
          min_gap: float = 0.8, keep: float = 0.3, titles: list[str] | None = None,
          note: str | None = None, burn_subtitles: bool | None = None) -> dict:
-    """Actions: new, show, add, remove (index), remove_gaps, cut_mistakes, chapters, note."""
-    p = new_plan(video) if action == "new" else _plan(video)
+    """The non-destructive edit plan (times are source seconds).
+    Actions: new | show | add (ops) | remove (index, or a list of indexes from `show`) | remove_gaps (min_gap,
+    keep) | cut_mistakes | chapters (titles) | note. Ops: cut, text, image, shape, zoom, audio, subtitle,
+    chapter, model — see the schema of `ops`."""
+    actions_ok = ("new", "show", "add", "remove", "remove_gaps", "cut_mistakes", "chapters", "note")
+    if action not in actions_ok:
+        raise ValueError(f"unknown action {action!r}: {' | '.join(actions_ok)}")
     info: dict[str, Any] = {}
-    if action == "add":
-        p.add(*(ops or []))
-    elif action == "remove" and index is not None:
-        info["removed"] = p.ops.pop(index).model_dump()
-    elif action in ("remove_gaps", "cut_mistakes", "chapters"):
-        a = AnchorFile.load(video)
-        if action == "remove_gaps":
-            info["cuts_added"] = p.remove_gaps(a, min_gap, keep)
-        elif action == "cut_mistakes":
-            info["cuts_added"] = p.cut_mistakes(a)
-        else:
-            info["chapters_added"] = p.chapters_from_anchors(a, titles)
-    if note:
-        p.notes.append(note)
-    if burn_subtitles is not None:
-        p.burn_subtitles = burn_subtitles
-    path = p.save()
+    with _locked(EditPlan.path_for(video)):
+        p = new_plan(video) if action == "new" else _plan(video)
+        if action == "add":
+            if not ops:
+                raise ValueError("add needs ops")
+            p.add(*ops)
+        elif action == "remove":
+            if index is None:
+                raise ValueError("remove needs index (see plan action='show')")
+            idx = sorted({index} if isinstance(index, int) else set(index), reverse=True)
+            bad = [i for i in idx if not -len(p.ops) <= i < len(p.ops)]
+            if bad:
+                raise ValueError(f"no op at index {bad}; the plan has {len(p.ops)} ops")
+            info["removed"] = [p.ops.pop(i).model_dump() for i in idx]  # highest first: indexes stay valid
+        elif action in ("remove_gaps", "cut_mistakes", "chapters"):
+            a = AnchorFile.load(video)
+            if action == "remove_gaps":
+                info["cuts_added"] = p.remove_gaps(a, min_gap, keep)
+            elif action == "cut_mistakes":
+                info["cuts_added"] = p.cut_mistakes(a)
+            else:
+                info["chapters_added"] = p.chapters_from_anchors(a, titles)
+        if action == "note" and not note:
+            raise ValueError("note needs note")
+        if note:
+            p.notes.append(note)
+        if burn_subtitles is not None:
+            p.burn_subtitles = burn_subtitles
+        path = p.save()
     out = {"plan": str(path), "summary": p.summary(), **info}
-    if action == "show":
+    if action in ("show", "remove"):
         out["ops"] = [f"{i}: {o.model_dump()}" for i, o in enumerate(p.ops)]
     return out
 
 
 def render_video(video: str, output: str | None = None, workers: int = 3, crf: int = 20,
                  scale_height: int | None = None, youtube: bool = True) -> dict:
+    """Render the edit plan (parallel chunks split in silences). youtube=True also writes the .srt and a
+    title/description with chapters. Output defaults to <video>_vidai.mp4."""
     p = _plan(video)
     output = output or str(Path(video).with_name(Path(video).stem + "_vidai.mp4"))
     r = render(p, output, workers=workers, crf=crf, scale_height=scale_height)
@@ -631,6 +722,7 @@ def render_video(video: str, output: str | None = None, workers: int = 3, crf: i
 
 # ---------- lab ----------
 def models() -> dict:
+    """Saved lab models, and whether the C speed-ups are built."""
     from . import native
 
     return {"models": lab.list_models(), "home": str(lab.models_dir()),
@@ -641,7 +733,8 @@ def train(class_path: str, data: str, metric: str, target: float, higher_is_bett
           hparams: dict | None = None, save_as: str | None = None, description: str = "",
           max_rounds: int = 1) -> dict:
     """Train a lab model. data = .npz with X_train, Y_train, X_val, Y_val.
-    class_path = 'vidai.lab.examples:ColorMatch' or '/path/model.py:MyModel' (code is copied into the registry).
+    class_path = 'vidai.lab.examples:ColorMatch' or '<file>.py:MyModel' where the file is in ~/.vidai or a session
+    folder (create it with vidai_create_file); the code is copied into the registry.
     Claude usually runs one round at a time (max_rounds=1), reads the metrics, changes hparams, repeats."""
     mod = class_path.partition(":")[0]
     code_file = mod if mod.endswith(".py") else None
@@ -676,13 +769,14 @@ def classify_video(video: str, model: str, kind: str | None = None, fps: float =
             i = j
         else:
             i += 1
-    if AnchorFile.path_for(video).exists():
-        a = AnchorFile.load(video)
-    else:
-        from .ffmpeg import probe
+    with _locked(AnchorFile.path_for(video)):
+        if AnchorFile.path_for(video).exists():
+            a = AnchorFile.load(video)
+        else:
+            from .ffmpeg import probe
 
-        a = AnchorFile(video=video, duration=probe(video).duration)
-    if segs:
-        a.add_segments(segs)
-    a.save()
+            a = AnchorFile(video=video, duration=probe(video).duration)
+        if segs:
+            a.add_segments(segs)
+        a.save()
     return {"segments": len(segs), "kind": kind}

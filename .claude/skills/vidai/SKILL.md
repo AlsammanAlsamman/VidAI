@@ -85,7 +85,14 @@ Show the user a 3–5 line summary of the config (what you will track and why).
     `vidai_install(packages, session, reason)`, `vidai_download(url, name, session, reason)`,
     `vidai_create_file(relpath, content, session, reason)`. VidAI says "Master, I need to ..." and waits for
     "VidAI confirm / deny" (or the window buttons); if the user said "VidAI, take all actions" it just runs.
-    Outside a recording it returns `needs_confirmation`: ask the user in chat, then call again with confirmed=True.
+    Outside a recording it returns `needs_confirmation`: tell the user what and why, then call
+    `vidai_confirmed_action(action, args, session, reason)` — Claude Code shows them a permission prompt, and
+    that prompt is their answer. Never try to switch on full access yourself: only the user can
+    ("VidAI, take all actions", or `vidai permissions full` in a terminal); it expires after a few hours.
+  - The first `live_processor` of a session makes VidAI ask the user to allow effect code written by Claude;
+    if they deny, use built-ins / library effects instead. Processor, effect and model names are plain
+    identifiers (letters, digits, `_ - .`).
+  - Tool errors come back with the real message (e.g. a bad op field): read it and fix the call.
 - Stop polling when `state` is no longer "recording" (or use `studio_wait`).
 
 ## Phase 3b — Learn (after every recording)

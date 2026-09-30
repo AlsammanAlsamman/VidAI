@@ -29,7 +29,7 @@ def test_record_with_fake_obs(video, tmp_path):
     rec.mark("mistake")
     import time
     time.sleep(1.2)
-    a = rec.stop()
+    rec.stop()
     assert obs.calls == ["start", "stop"]
     saved = AnchorFile.load(out)
     assert saved.brief.title == "demo"

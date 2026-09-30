@@ -38,7 +38,7 @@ class _Worker(LiveProcessor):
         self._started = False
 
     def _start(self):
-        if not self._started:
+        if not self._started and not self.closed:
             self._started = True
             threading.Thread(target=self._loop, daemon=True).start()
 
@@ -50,15 +50,23 @@ class _Worker(LiveProcessor):
         self._start()
 
     def _loop(self):
+        if not getattr(self, "_setup_done", False):
+            try:
+                self.setup()
+                self._setup_done = True
+            except Exception as e:
+                self.error = repr(e)[:200]
+                if getattr(self, "_ctx", None):
+                    self._ctx.bus.publish("error", {"processor": self.name, "error": self.error})
+                return
         try:
-            self.setup()
-        except Exception as e:
-            self.error = repr(e)[:200]
-            if getattr(self, "_ctx", None):
-                self._ctx.bus.publish("error", {"processor": self.name, "error": self.error})
-            return
+            self._work_loop()
+        finally:
+            self._started = False  # disabled or removed: offer() starts it again when re-enabled
+
+    def _work_loop(self):
         last = 0.0
-        while self.enabled or self._frame is not None:
+        while not self.closed and (self.enabled or self._frame is not None):
             wait = 1.0 / self.params.get("rate", self.rate) - (time.monotonic() - last)
             if wait > 0:
                 time.sleep(wait)

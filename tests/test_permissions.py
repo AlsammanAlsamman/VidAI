@@ -67,8 +67,9 @@ def test_full_access_skips_the_question(rec):
 def test_without_recorder_claude_asks_in_chat(tmp_path):
     out = service.vidai_create_file("a.txt", "x", session=None)
     assert out["status"] == "needs_confirmation" and "Allow?" in out["ask_user"]
-    out = service.vidai_create_file("a.txt", "x", session=None, confirmed=True)
-    assert out["status"] == "done"
+    assert "vidai_confirmed_action" in out["then"]
+    out = service.vidai_confirmed_action("create_file", {"relpath": "a.txt", "content": "x"})
+    assert out["status"] == "done" and out["approved_by"] == "claude_code_prompt"
     log = (actions.home() / "actions.log").read_text()
     assert "create_file" in log
 
