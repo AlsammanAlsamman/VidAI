@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vidai-rec"
-version = "0.4.0"
+version = "0.5.0"
 description = "Record, understand and improve your videos by talking to Claude (under development)"
 readme = "README.md"
 requires-python = ">=3.10"
