@@ -57,40 +57,9 @@ def _rounded(img: Image.Image, radius: int) -> Image.Image:
     return out
 
 
-def _runs(text: str) -> list[tuple[bool, str]]:
-    """Split text into (is_emoji, piece) runs; variation selectors / joiners are dropped."""
-    from .live.stickers import _EMOJI_RE
-
-    out: list[tuple[bool, str]] = []
-    for ch in text.replace("\ufe0f", "").replace("\u200d", ""):
-        e = bool(_EMOJI_RE.match(ch))
-        if out and not e and not out[-1][0]:
-            out[-1] = (False, out[-1][1] + ch)
-        else:
-            out.append((e, ch))
-    return out
-
-
-def _tlen(draw, text: str, font) -> float:
-    """Width of text where emoji count as one square glyph (the UI font has none)."""
-    size = getattr(font, "size", 15)
-    return sum(size + 3 if e else draw.textlength(p, font=font) for e, p in _runs(text))
-
-
-def _text(img, draw, xy, text: str, font, fill) -> None:
-    """draw.text that also shows emoji (drawn with the sticker renderer: the UI font has no emoji)."""
-    from .live.stickers import scaled
-
-    x, y = xy
-    size = getattr(font, "size", 15)
-    for e, piece in _runs(text):
-        if e:
-            spr = Image.fromarray(scaled(piece, size + 3))
-            img.paste(spr, (int(x), int(y + max(0, (size + 4 - spr.height) / 2))), spr)
-            x += size + 3
-        else:
-            draw.text((x, y), piece, font=font, fill=fill)
-            x += draw.textlength(piece, font=font)
+from .overlays import draw_text as _text  # noqa: E402  (text with emoji: the UI font has none)
+from .overlays import emoji_runs as _runs  # noqa: E402,F401
+from .overlays import text_length as _tlen  # noqa: E402
 
 
 def _wrap(draw, text: str, font, width: int) -> list[str]:
