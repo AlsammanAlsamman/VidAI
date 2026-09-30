@@ -272,6 +272,8 @@ class CommandsMixin:
         if not p:
             raise KeyError(f"no processor {c['name']!r}")
         p.configure(c.get("params", {}))
+        self.chain.ensure_feeds(p)  # e.g. behind_hair switched on
+        self.chain.prune_feeds()
         return {"name": p.name, "params": p.params}
 
     def _cmd_rule(self, cmd: str, c: dict, t: float, until: float | None) -> dict | None:

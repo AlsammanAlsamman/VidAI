@@ -50,7 +50,8 @@ class LiveProcessor:
     defaults: dict[str, Any] = {}
     listens: set[str] = set()
     budget_ms: float = 8.0
-    stage: int = 1  # 0 = transforms the picture (zoom, blur, models) — runs first; 1 = overlays on top
+    stage: float = 1  # 0 = transforms the picture (zoom, blur, models) — runs first; 1 = overlays on top
+    feeds: frozenset = frozenset()  # feed models this effect draws with (vidai.live.feed), added automatically
 
     def __init__(self, name: str, params: dict[str, Any] | None = None, enabled: bool = True,
                  until: float | None = None) -> None:
@@ -70,6 +71,9 @@ class LiveProcessor:
     def configure(self, params: dict[str, Any]) -> None:
         self.params.update(params)
 
+    def wants_feeds(self) -> set[str]:
+        return set(self.feeds)
+
     def on_event(self, ev: dict, ctx: "Context") -> None: ...
 
     def process(self, frame: np.ndarray, t: float, ctx: "Context") -> np.ndarray:
@@ -88,6 +92,15 @@ class Context:
         self._cache: dict[Any, np.ndarray] = {}
         self.tracks = None  # vidai.live.trackers.Tracks, started when an effect needs it
         self.quality = 0  # performance level set by the governor: 0 normal, 1 light, 2 minimal
+        self.feed: dict[str, Any] = {}  # feed models trained on this video (vidai.live.feed), by key
+
+    def composite(self, frame: np.ndarray, rgba: np.ndarray, x: int, y: int, alpha: float = 1.0,
+                  occlude=frozenset(), strength: float = 0.8) -> np.ndarray:
+        """Draw an overlay *into the scene*: matched to the room's light, and behind hair etc. (`occlude`)
+        when those feed models are ready. For things attached to people/objects, not for screen graphics."""
+        from .feed import composite
+
+        return composite(self, frame, rgba, x, y, alpha, occlude, strength)
 
     def need_tracking(self) -> None:
         if self.tracks is None:
@@ -304,6 +317,7 @@ class ProcessorChain:
     def add(self, p: LiveProcessor) -> LiveProcessor:
         if p.tracking:
             self.ctx.need_tracking()
+        self.ensure_feeds(p)
         self.remove(p.name)
         # copy-on-write: the frame loop iterates self.items without a lock, so never mutate it in place
         self.items = sorted(self.items + [p], key=lambda q: q.stage)  # stable: transforms first, then overlays
@@ -316,7 +330,23 @@ class ProcessorChain:
         self.items = [p for p in self.items if p.name != name]
         for p in gone:
             self._close(p)
+        if gone and not name.startswith("_feed_"):
+            self.prune_feeds()
         return bool(gone)
+
+    def ensure_feeds(self, p: LiveProcessor) -> None:
+        """Start the feed models an effect draws with (e.g. {"lighting", "hair"}), shared by all effects."""
+        from .feed import FEEDS
+
+        for key in p.wants_feeds():
+            if key in FEEDS and self.get(f"_feed_{key}") is None:
+                self.add(FEEDS[key](f"_feed_{key}"))
+
+    def prune_feeds(self) -> None:
+        """Stop automatic feed models no remaining effect uses (they are saved to the lab when closed)."""
+        wanted = set().union(*(p.wants_feeds() for p in self.items if not p.name.startswith("_feed_")))
+        for p in [q for q in self.items if q.name.startswith("_feed_") and q.name[6:] not in wanted]:
+            self.remove(p.name)
 
     def _close(self, p: LiveProcessor) -> None:
         if getattr(p, "_sub", None) is not None:
@@ -452,10 +482,17 @@ class Attach(LiveProcessor):
     """Stick an emoji / word / image to a body part and follow it.
     params: what (emoji, word like "apple", or image path), to (hand | right_hand | left_hand | other_hand |
     finger | head | above_head | face | eyes | nose | mouth | screen), scale, dx, dy (offsets, fraction of
-    the part's size), position (for to=screen)."""
+    the part's size), position (for to=screen), realistic (match the room's light, default on),
+    behind_hair (hair covers it: for things worn on the head)."""
     type_name = "attach"
     tracking = True
-    defaults = {"what": "🍎", "to": "hand", "scale": 1.0, "dx": 0.0, "dy": 0.0, "position": "bottom-left"}
+    defaults = {"what": "🍎", "to": "hand", "scale": 1.0, "dx": 0.0, "dy": 0.0, "position": "bottom-left",
+                "realistic": True, "behind_hair": False}
+
+    def wants_feeds(self) -> set[str]:
+        if self.params["to"] == "screen" or not self.params.get("realistic", True):
+            return set()  # screen graphics stay crisp
+        return {"lighting"} | ({"hair"} if self.params.get("behind_hair") else set())
 
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
@@ -520,7 +557,11 @@ class Attach(LiveProcessor):
         # keep it inside the picture (a big title above a head near the top edge must not vanish)
         cx = min(max(cx, sw / 2), W - sw / 2) if sw <= W else W / 2
         cy = min(max(cy, sh / 2), H - sh / 2) if sh <= H else H / 2
-        native.alpha_blend(frame, spr, int(cx - sw / 2), int(cy - sh / 2), self.alpha)
+        if self.params.get("realistic", True):
+            ctx.composite(frame, spr, int(cx - sw / 2), int(cy - sh / 2), self.alpha,
+                          occlude={"hair"} if self.params.get("behind_hair") else frozenset())
+        else:
+            native.alpha_blend(frame, spr, int(cx - sw / 2), int(cy - sh / 2), self.alpha)
         return frame
 
 
@@ -649,3 +690,4 @@ class Adjust(LiveProcessor):
 
 from . import background as _background  # noqa: E402,F401  (registers the built-in "background" effect)
 from . import hub_effects as _hub_effects  # noqa: E402,F401  (emotion, gestures, style, grade)
+from . import feed as _feed  # noqa: E402,F401  (feed models: lighting, hair — trained on the live video)
