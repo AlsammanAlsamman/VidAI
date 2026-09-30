@@ -517,6 +517,9 @@ class Attach(LiveProcessor):
         sh, sw = spr.shape[:2]
         cx += self.params["dx"] * w
         cy += self.params["dy"] * w
+        # keep it inside the picture (a big title above a head near the top edge must not vanish)
+        cx = min(max(cx, sw / 2), W - sw / 2) if sw <= W else W / 2
+        cy = min(max(cy, sh / 2), H - sh / 2) if sh <= H else H / 2
         native.alpha_blend(frame, spr, int(cx - sw / 2), int(cy - sh / 2), self.alpha)
         return frame
 
