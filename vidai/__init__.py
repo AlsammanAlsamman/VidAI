@@ -4,7 +4,7 @@ from .brief import QUESTIONS, Brief
 from .edit import (ApplyModel, Audio, Chapter, Cut, EditPlan, Image, Shape, Subtitle, Text, Zoom,
                    new_plan)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = ["STATS", "AnchorFile", "Event", "Segment", "Series", "list_stats", "select_stats", "QUESTIONS",
            "Brief", "ApplyModel", "Audio", "Chapter", "Cut", "EditPlan", "Image", "Shape", "Subtitle", "Text",
