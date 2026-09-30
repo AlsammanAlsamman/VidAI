@@ -42,6 +42,13 @@ for _k, _d in _STYLES.items():
         "words": [_k.replace("-", " "), _k.split("-")[0], "painting", "painted", "artistic", "art", "style"],
         "does": f"paints the picture in {_d} style (slow live, full quality when editing)"}
 
+# SHA-256 of verified files (others are pinned on first download, see models_dl.fetch)
+CATALOG["emotion"]["sha256"] = "a2a2ba6a335a3b29c21acb6272f962bd3d47f84952aaffa03b60986e04efa61c"
+CATALOG["gestures"]["sha256"] = "97952348cf6a6a4915c2ea1496b4b37ebabc50cbbf80571435643c455f2b0482"
+CATALOG["anime"]["sha256"] = "5a84ca468f3c4fd891fe8c883a3a507ed3e463f4f059985735f6449dae7590b5"
+CATALOG["style_mosaic"]["sha256"] = "fa646dedade881243f8d5a2ceb7de2b93675b21fc24f7482894ac4851a9a0a47"
+CATALOG["style_candy"]["sha256"] = "9d11a3529d1e547da6ae07201d93484dbab2ec0a3614535752c8f40f0fe2968a"
+
 
 def hub_dir() -> Path:
     d = assets_dir() / "hub"

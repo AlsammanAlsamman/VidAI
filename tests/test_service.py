@@ -32,4 +32,5 @@ def test_brief_and_stats(tmp_path):
 def test_mcp_tools_registered():
     tools = asyncio.run(build_server().list_tools())
     names = {t.name for t in tools}
-    assert {"analyze_video", "anchors", "plan", "render_video", "train", "record_start"} <= names
+    assert {"analyze_video", "anchors", "plan", "render_video", "train", "vidai_confirmed_action"} <= names
+    assert "record_start" not in names  # legacy OBS backend: CLI / Python only

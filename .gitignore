@@ -20,3 +20,6 @@ video.damaged.mkv
 
 dist/
 build/
+
+# local knowledge graph (graphify)
+graphify-out/

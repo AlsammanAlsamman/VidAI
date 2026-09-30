@@ -12,7 +12,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/status-under%20development-ff3b5c?style=for-the-badge" alt="status: under development">
   <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec&style=for-the-badge" alt="PyPI vidai-rec"></a>
-  <img src="https://img.shields.io/badge/tests-104%20passing-34d399?style=for-the-badge" alt="104 tests passing">
+  <img src="https://img.shields.io/badge/tests-137%20passing-34d399?style=for-the-badge" alt="137 tests passing">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-5b8cff" alt="python 3.10+">
@@ -192,9 +192,11 @@ Nothing fits? Claude searches Hugging Face (`model_search(..., online=True)`) an
 <details>
 <summary><b>🔐 Permissions</b></summary>
 
-- VidAI installs, downloads and creates files itself — no Claude Code prompts
-- Ask mode: *"Master, I need to …"* → *"VidAI confirm"*; full access: *"VidAI, take all actions"*
-- Installs only into VidAI's own environment, files only under `~/.vidai` and your session folders; everything logged in `~/.vidai/actions.log`
+- VidAI installs, downloads and creates files itself — no Claude Code prompts while you record
+- Ask mode: *"Master, I need to …"* → *"VidAI confirm"*; full access: *"VidAI, take all actions"* (expires after 4 hours)
+- **Only you can say yes**: Claude can never confirm a request or switch on full access itself — that takes your voice (with "VidAI"), a click or typing in the window, or `vidai permissions full` in a terminal. Outside a recording, Claude Code's own permission prompt asks you
+- Effect code written by Claude runs only after you allow it once per session
+- Installs only into VidAI's own environment, files only under `~/.vidai` and real session folders, downloads only over https from public hosts with checksum checks; everything logged in `~/.vidai/actions.log`
 </details>
 
 <details>
@@ -222,7 +224,7 @@ cd your-project && claude
 ```
 
 Claude interviews you, opens the **VidAI Recorder**, and edits the video when you are done.
-Prefer the terminal? `vidai studio` · `vidai analyze video.mkv` · `vidai plan video.mkv remove_gaps` · `vidai render video.mkv`
+Prefer the terminal? `vidai studio` · `vidai analyze video.mkv` · `vidai plan video.mkv remove_gaps` · `vidai render video.mkv` · `vidai sessions` · `vidai permissions`
 
 <details>
 <summary>Working on VidAI itself</summary>
@@ -230,7 +232,9 @@ Prefer the terminal? `vidai studio` · `vidai analyze video.mkv` · `vidai plan 
 ```bash
 git clone https://github.com/AlsammanAlsamman/VidAI && cd VidAI
 python3 -m venv .venv && .venv/bin/pip install -e ".[all]"
-.venv/bin/python -m pytest -q        # 104 tests
+.venv/bin/python -m pytest -q        # 137 tests (add -m slow for the Whisper tests)
+.venv/bin/ruff check .               # lint (also runs in CI)
+ln -s "$PWD/.venv/bin/vidai-mcp" ~/.local/bin/  # .mcp.json runs `vidai-mcp` from PATH
 node assets/flowchart/flowchart.js   # rebuild the flowchart
 ```
 </details>
@@ -242,15 +246,19 @@ ffmpeg is bundled; models download on first use.
 
 ## 🧩 For Claude
 
-VidAI is a Claude Code plugin: an MCP server with **43 tools** plus a skill that teaches the workflow.
+VidAI is a Claude Code plugin: an MCP server (`vidai-mcp`) with **41 tools** plus a skill that teaches the workflow.
+Tool errors come back to Claude with their real message, so it can fix a bad call by itself.
 
 | Area | Tools |
 |---|---|
-| Brief & recording | `brief_questions`, `studio_start`, `studio_wait`, `studio_status`, `studio_recover` |
-| Live | `live_wait_request`, `live_control`, `live_effect`, `live_processor`, `live_say`, `live_ask_user`, `live_notify`, `live_stats` |
-| Models | `model_search`, `model_apply`, `color_from_photo`, `train`, `classify_video` |
-| Permissions & memory | `vidai_install`, `vidai_download`, `vidai_create_file`, `vidai_permissions`, `vidai_profile`, `vidai_learn`, `vidai_forget` |
-| Editing | `analyze_video`, `anchors`, `frame`, `contact_sheet`, `plan`, `render_video` |
+| Brief & recording | `brief_questions`, `save_brief`, `suggest_stats`, `studio_devices`, `studio_start`, `studio_wait`, `studio_status`, `studio_recover`, `studio_sessions` |
+| Live | `live_guide`, `live_wait_request`, `live_control`, `live_effects`, `live_effect`, `live_processor`, `live_say`, `live_ask_user`, `live_notify`, `live_stats`, `live_status` |
+| Models | `model_search`, `model_apply`, `color_from_photo`, `models`, `train`, `classify_video` |
+| Permissions & memory | `vidai_install`, `vidai_download`, `vidai_create_file`, `vidai_confirmed_action`, `vidai_permissions`, `vidai_profile`, `vidai_learn`, `vidai_forget` |
+| Editing | `analyze_video`, `anchors`, `add_anchor_events`, `frame`, `contact_sheet`, `plan`, `render_video` |
+
+`vidai_confirmed_action` is the only tool Claude Code asks you about (`"ask"` in `.claude/settings.json`): its
+prompt is your consent for an install or download when no recorder is open. Keep it out of any allow list.
 
 ---
 

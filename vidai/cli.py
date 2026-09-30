@@ -56,6 +56,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--mode", default="summary", choices=["summary", "at", "segments", "events", "series", "chunks"])
     s.add_argument("--t", type=float, default=0.0)
     s.add_argument("--kind")
+    s.add_argument("--t0", type=float, default=0.0)
+    s.add_argument("--t1", type=float)
+    s.add_argument("--workers", type=int, default=3, help="for --mode chunks")
 
     s = sub.add_parser("frame", help="extract a frame (png)")
     s.add_argument("video")
@@ -69,13 +72,15 @@ def main(argv: list[str] | None = None) -> None:
 
     s = sub.add_parser("plan", help="build the edit plan")
     s.add_argument("video")
-    s.add_argument("action", choices=["new", "show", "add", "remove", "remove_gaps", "cut_mistakes", "chapters"])
+    s.add_argument("action", choices=["new", "show", "add", "remove", "remove_gaps", "cut_mistakes", "chapters",
+                                      "note"])
     s.add_argument("--ops", help="JSON list of ops (for add)")
-    s.add_argument("--index", type=int)
+    s.add_argument("--index", type=int, nargs="+", help="op index(es) to remove (see: plan VIDEO show)")
     s.add_argument("--min-gap", type=float, default=0.8)
     s.add_argument("--keep", type=float, default=0.3)
     s.add_argument("--titles", nargs="*")
-    s.add_argument("--burn-subtitles", action="store_true", default=None)
+    s.add_argument("--note")
+    s.add_argument("--burn-subtitles", action=argparse.BooleanOptionalAction, default=None)
 
     s = sub.add_parser("render", help="render the plan (parallel, YouTube-ready)")
     s.add_argument("video")
@@ -83,8 +88,26 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--workers", type=int, default=3)
     s.add_argument("--crf", type=int, default=20)
     s.add_argument("--height", type=int)
+    s.add_argument("--no-youtube", action="store_true", help="skip the .srt and YouTube description")
 
     sub.add_parser("models", help="list lab models")
+
+    s = sub.add_parser("classify", help="run a frame_classifier lab model over a video -> anchor segments")
+    s.add_argument("video")
+    s.add_argument("model")
+    s.add_argument("--kind")
+    s.add_argument("--fps", type=float, default=2.0)
+
+    s = sub.add_parser("sessions", help="recent recording sessions")
+    s.add_argument("--limit", type=int, default=10)
+
+    s = sub.add_parser("status", help="state of a recording session")
+    s.add_argument("session")
+
+    s = sub.add_parser("permissions", help="show or set what VidAI may do on its own (you decide, not Claude)")
+    s.add_argument("mode", nargs="?", choices=["ask", "full"])
+    s.add_argument("--session", help="a session folder (default: outside recordings)")
+    s.add_argument("--hours", type=float, default=4.0, help="full access lasts this long")
 
     s = sub.add_parser("train", help="train a lab model (one or more rounds)")
     s.add_argument("class_path")
@@ -99,6 +122,16 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("mcp", help="run the MCP server (stdio)")
 
     a = ap.parse_args(argv)
+    try:
+        _run(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:  # JSON, like every other output, so Claude can read what went wrong
+        _print({"error": f"{type(e).__name__}: {e}"})
+        sys.exit(1)
+
+
+def _run(a: argparse.Namespace) -> None:
     if a.cmd == "brief":
         from .brief import ask_interactive
 
@@ -131,16 +164,29 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "analyze":
         _print(service.analyze_video(a.video, a.stats, a.workers, a.silence_db, fast=a.fast))
     elif a.cmd == "anchors":
-        _print(service.anchors(a.video, a.mode, a.t, a.kind))
+        _print(service.anchors(a.video, a.mode, a.t, a.kind, a.t0, a.t1, a.workers))
     elif a.cmd == "frame":
         _print(service.frame(a.video, a.t, a.out))
     elif a.cmd == "sheet":
         _print(service.contact_sheet(a.video, a.times, a.out))
     elif a.cmd == "plan":
-        _print(service.plan(a.video, a.action, json.loads(a.ops) if a.ops else None, a.index, a.min_gap, a.keep,
-                            a.titles, burn_subtitles=a.burn_subtitles))
+        index = a.index[0] if a.index and len(a.index) == 1 else a.index
+        _print(service.plan(a.video, a.action, json.loads(a.ops) if a.ops else None, index, a.min_gap, a.keep,
+                            a.titles, note=a.note, burn_subtitles=a.burn_subtitles))
     elif a.cmd == "render":
-        _print(service.render_video(a.video, a.out, a.workers, a.crf, a.height))
+        _print(service.render_video(a.video, a.out, a.workers, a.crf, a.height, youtube=not a.no_youtube))
+    elif a.cmd == "classify":
+        _print(service.classify_video(a.video, a.model, a.kind, a.fps))
+    elif a.cmd == "sessions":
+        _print(service.studio_sessions(limit=a.limit))
+    elif a.cmd == "status":
+        _print(service.studio_status(a.session))
+    elif a.cmd == "permissions":
+        from . import actions
+
+        if a.mode:  # typed by the user in a terminal: this IS their consent
+            actions.set_mode(a.session, a.mode, hours=a.hours)
+        _print(service.vidai_permissions(a.session))
     elif a.cmd == "models":
         _print(service.models())
     elif a.cmd == "train":

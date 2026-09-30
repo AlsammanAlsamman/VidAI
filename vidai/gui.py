@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 import customtkinter as ctk
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
-from .live.pipeline import LiveConfig, LivePipeline
+from .live.pipeline import LivePipeline
 from .overlays import find_font
 from .session import Session, SessionRecorder
 
@@ -288,12 +289,13 @@ class RecorderApp:
         pipe = self._pipe()
         if not text or pipe is None:
             return
-        if self.question:  # typing answers Claude's question
-            pipe.command({"cmd": "answer", "question": self.question[0], "text": text, "by": "typed"}, source="gui")
+        q = self.question
+        if q:  # typing answers Claude's question
+            pipe.command({"cmd": "answer", "question": q[0], "text": text, "by": "typed"}, source="gui")
             return
         cmd = __import__("vidai.live.sensors", fromlist=["parse_command"]).parse_command("vidai " + text)
         if cmd and cmd["command"] != "claude":  # typed built-in command ("zoom in", "undo", "help")
-            pipe.bus.publish("voice_command", {**cmd, "text": text, "typed": True})
+            pipe.bus.publish("voice_command", {**cmd, "text": text, "typed": True, "wake": True})
         else:
             self.toast(f"→ {text}", ACCENT_2)
             threading.Thread(target=pipe.request, args=(text, "typed"), daemon=True).start()
@@ -354,9 +356,9 @@ class RecorderApp:
             d.rounded_rectangle([12, y, 12 + w + 24, y + h], 12, fill=(10, 10, 20, 200))
             for i, part in enumerate(parts):
                 d.text((24, y + 4 + 20 * i), part, font=self._f_small, fill=color)
-        pending = (f"{self.session.live.address}, I need to {self.ask[1]}", WARN) if self.ask else (
-            ((self.question[1] if self.question[1].startswith("💡") else f"Claude asks: {self.question[1]}"),
-             ACCENT_2) if self.question else None)
+        ask, q = self.ask, self.question  # the bus thread may clear them meanwhile
+        pending = (f"{self.session.live.address}, I need to {ask[1]}", WARN) if ask else (
+            ((q[1] if q[1].startswith("💡") else f"Claude asks: {q[1]}"), ACCENT_2) if q else None)
         if pending:  # the question stays on the preview until answered (never recorded)
             parts = _wrap(d, pending[0], self._f_small, PREVIEW_W - 48)[:3]
             h = 12 + 20 * len(parts)
@@ -539,15 +541,17 @@ class RecorderApp:
         pipe = self._pipe()
         if not pipe:
             return
-        if self.ask and what in ("confirm", "deny"):
-            pipe.command({"cmd": what, "request": self.ask[0], "by": "button"}, source="gui")
-        elif self.question and what not in ("confirm", "deny"):
-            pipe.command({"cmd": "answer", "question": self.question[0], "text": what, "by": "button"}, source="gui")
+        ask, q = self.ask, self.question
+        if ask and what in ("confirm", "deny"):
+            pipe.command({"cmd": what, "request": ask[0], "by": "button"}, source="gui")
+        elif q and what not in ("confirm", "deny"):
+            pipe.command({"cmd": "answer", "question": q[0], "text": what, "by": "button"}, source="gui")
 
     def _show_bar(self) -> None:
         """Answer bar: permission (Confirm/Deny) or Claude's question (one button per option)."""
-        want = ("ask", self.ask) if self.ask else (("q", self.question) if self.question else None)
-        if want and want[0] == "q" and not self.question[2]:
+        ask, q = self.ask, self.question  # the bus thread may clear them meanwhile
+        want = ("ask", ask) if ask else (("q", q) if q else None)
+        if want and want[0] == "q" and not q[2]:
             want = None  # free-form question: keep the "Tell VidAI…" box — typing or speaking answers it
         if want == self._bar_for:
             return
@@ -563,7 +567,7 @@ class RecorderApp:
             self.ask_label.configure(text="Allow?", text_color=WARN)
             buttons = [("✓ Confirm (y)", "confirm", OK), ("✕ Deny (n)", "deny", CARD)]
         else:
-            _, text, options = self.question
+            _, text, options = want[1]
             self.ask_label.configure(text="Answer:", text_color=ACCENT_2)
             buttons = [(o, o, ACCENT) for o in options[:4]]
         for label, what, color in buttons:
@@ -680,6 +684,14 @@ class RecorderApp:
 
     # ---------- UI loop (10 fps) ----------
     def _tick(self) -> None:
+        try:
+            self._tick_once()
+        except Exception as e:  # one bad update must never stop the window (and ctrl+alt+s) for good
+            print(f"vidai gui: {e!r}", file=sys.stderr)
+        finally:
+            self.root.after(100, self._tick)
+
+    def _tick_once(self) -> None:
         self._tickn += 1
         if self._stop_requested.is_set():
             self._stop_requested.clear()
@@ -721,7 +733,6 @@ class RecorderApp:
         if self.live_text and self.state in ("idle", "recording"):
             self.set_status(self.live_text, self.live_color)
             self.live_text = ""
-        self.root.after(100, self._tick)
 
 
 def main(argv: list[str] | None = None) -> None:

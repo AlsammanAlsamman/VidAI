@@ -102,7 +102,6 @@ def test_session_history_and_brief_defaults(tmp_path):
     assert prof["recent_sessions"][-1]["requests"] == ["put a crown on my head"]
     assert Profile().pref("brief_defaults")["audience"] == "Arab biology students"
     out = service.studio_start({"title": "next"}, root=str(tmp_path), open_gui=False)
-    s2 = service.Session.load(out["session"]) if hasattr(service, "Session") else None
     from vidai.session import Session
 
     assert Session.load(out["session"]).brief.audience == "Arab biology students"  # not asked again

@@ -5,8 +5,12 @@ consent for the session:
   - ask mode (default): VidAI says "Master, I need to ... Say 'VidAI confirm' or 'VidAI deny'" and waits
   - full mode: the user said "VidAI, take all actions" -> everything is allowed for this session
 Limits that always apply: installs go only into VidAI's own Python environment (pip, never system), files
-only under ~/.vidai/ (workspace) or the session folder, downloads up to MAX_DOWNLOAD bytes. Every action is
-appended to ~/.vidai/actions.log.
+only under ~/.vidai/ (workspace) or a real session folder, downloads only over https from public hosts, up to
+MAX_DOWNLOAD bytes. Every action is appended to ~/.vidai/actions.log.
+
+Consent is given only by the user: by voice or a button in the recorder, or (outside a recording) through
+Claude Code's own permission prompt for the `vidai_confirmed_action` tool. Claude can lower the mode to "ask"
+but never raise it to "full"; full access expires after FULL_HOURS.
 """
 from __future__ import annotations
 
@@ -17,10 +21,11 @@ import subprocess
 import sys
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 MAX_DOWNLOAD = 2 * 1024 ** 3  # 2 GB
+FULL_HOURS = 4.0
+_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}$")
 _PKG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\],]*([<>=!~]=?[A-Za-z0-9.*+!\-]+)?$")
 
 
@@ -47,19 +52,64 @@ def _perm_file(session: str | Path | None) -> Path:
     return (Path(session) if session else home()) / "permissions.json"
 
 
-def get_mode(session: str | Path | None) -> str:
+def _perms(session: str | Path | None) -> dict:
     try:
-        return json.loads(_perm_file(session).read_text())["mode"]
-    except (OSError, ValueError, KeyError):
-        return "ask"
+        d = json.loads(_perm_file(session).read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def set_mode(session: str | Path | None, mode: str) -> None:
+def _save_perms(session: str | Path | None, d: dict) -> None:
     p = _perm_file(session)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"mode": mode, "since": time.strftime("%Y-%m-%d %H:%M:%S")}))
+    tmp.write_text(json.dumps(d))
     os.replace(tmp, p)
+
+
+def get_mode(session: str | Path | None) -> str:
+    d = _perms(session)
+    if d.get("mode") == "full" and time.time() < float(d.get("until", 0)):
+        return "full"
+    return "ask"
+
+
+def set_mode(session: str | Path | None, mode: str, hours: float = FULL_HOURS) -> None:
+    d = _perms(session)
+    d.update({"mode": mode, "since": time.strftime("%Y-%m-%d %H:%M:%S")})
+    if mode == "full":
+        d["until"] = time.time() + hours * 3600
+    else:
+        d.pop("until", None)
+    _save_perms(session, d)
     log("permission_mode", mode=mode, session=str(session or ""))
+
+
+def code_allowed(session: str | Path | None) -> bool:
+    """May Claude-written effect code run in this session? (the user said yes once, or full access)"""
+    return get_mode(session) == "full" or bool(_perms(session).get("code"))
+
+
+def allow_code(session: str | Path | None) -> None:
+    d = _perms(session)
+    d["code"] = True
+    _save_perms(session, d)
+    log("allow_code", session=str(session or ""))
+
+
+def safe_name(name: str, what: str = "name") -> str:
+    """A plain identifier used in a file name (no paths, no '..')."""
+    if not isinstance(name, str) or not _NAME.match(name) or ".." in name:
+        raise ValueError(f"invalid {what} {name!r}: use letters, digits, '_', '-', '.' (max 64)")
+    return name
+
+
+def session_dir(session: str | Path) -> Path:
+    """A real VidAI session folder (has session.json), resolved."""
+    d = Path(session).expanduser().resolve()
+    if not (d / "session.json").is_file():
+        raise ValueError(f"{session!r} is not a VidAI session folder")
+    return d
 
 
 # ---------------- the actions themselves ----------------
@@ -83,54 +133,34 @@ def _safe_target(name: str, base: Path) -> Path:
     return target
 
 
-def download(url: str, name: str | None = None, folder: str = "downloads") -> dict:
-    u = urllib.parse.urlparse(url)
-    if u.scheme not in ("https", "http"):
-        raise ValueError("only http(s) downloads")
-    base = workspace() / folder
+def download(url: str, name: str | None = None, folder: str = "downloads", sha256: str | None = None) -> dict:
+    from .models_dl import fetch
+
+    base = _safe_target(folder, workspace())
     base.mkdir(parents=True, exist_ok=True)
-    name = name or Path(u.path).name or "download.bin"
+    name = name or Path(urllib.parse.urlparse(url).path).name or "download.bin"
     target = _safe_target(name, base)
-    tmp = target.with_suffix(target.suffix + ".part")
-    n = 0
-    req = urllib.request.Request(url, headers={"User-Agent": "vidai"})
-    with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
-        while chunk := r.read(1 << 16):
-            n += len(chunk)
-            if n > MAX_DOWNLOAD:
-                f.close()
-                tmp.unlink(missing_ok=True)
-                raise ValueError("download too large")
-            f.write(chunk)
-    os.replace(tmp, target)
-    log("download", url=url, path=str(target), bytes=n)
-    return {"path": str(target), "bytes": n}
+    _, n, digest = fetch(url, target, sha256=sha256, max_bytes=MAX_DOWNLOAD, timeout=120)
+    log("download", url=url, path=str(target), bytes=n, sha256=digest)
+    return {"path": str(target), "bytes": n, "sha256": digest}
 
 
 def download_model(model_id: str) -> dict:
-    """Install a catalog model (vidai.hub) into ~/.vidai/assets/hub."""
+    """Install a catalog model (vidai.hub) into ~/.vidai/assets/hub (checksum-verified)."""
     from . import hub
+    from .models_dl import fetch
 
     m = hub.CATALOG[model_id]
     target = hub.path(model_id)
-    tmp = target.with_suffix(target.suffix + ".part")
-    n = 0
-    req = urllib.request.Request(m["url"], headers={"User-Agent": "vidai"})
-    with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as f:
-        while chunk := r.read(1 << 16):
-            n += len(chunk)
-            if n > MAX_DOWNLOAD:
-                f.close()
-                tmp.unlink(missing_ok=True)
-                raise ValueError("download too large")
-            f.write(chunk)
-    os.replace(tmp, target)
-    log("install_model", model=model_id, url=m["url"], path=str(target), bytes=n, license=m["license"])
+    _, n, digest = fetch(m["url"], target, sha256=m.get("sha256"), pin_key=f"hub/{m['file']}",
+                         max_bytes=MAX_DOWNLOAD)
+    log("install_model", model=model_id, url=m["url"], path=str(target), bytes=n, license=m["license"],
+        sha256=digest)
     return {"model": model_id, "path": str(target), "bytes": n, "license": m["license"]}
 
 
 def create_file(relpath: str, content: str, session: str | None = None) -> dict:
-    base = Path(session) if session else workspace()
+    base = session_dir(session) if session else workspace()
     target = _safe_target(relpath, base)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
@@ -156,6 +186,6 @@ def describe(action: str, args: dict) -> str:
 
 
 RUN = {"install": lambda a: install(a["packages"]),
-       "download": lambda a: download(a["url"], a.get("name"), a.get("folder", "downloads")),
+       "download": lambda a: download(a["url"], a.get("name"), sha256=a.get("sha256")),
        "create_file": lambda a: create_file(a["relpath"], a["content"], a.get("session")),
        "model": lambda a: download_model(a["model"])}

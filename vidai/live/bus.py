@@ -57,8 +57,12 @@ class LiveBus:
             with self._lock:
                 self._maybe_flush(force=True)
 
-    def subscribe(self, fn: Callable[[dict], None], kinds: set[str] | list[str] | None = None) -> None:
-        self._subs.append((set(kinds) if kinds else None, fn))
+    def subscribe(self, fn: Callable[[dict], None], kinds: set[str] | list[str] | None = None) -> Callable:
+        self._subs = self._subs + [(set(kinds) if kinds else None, fn)]  # copy-on-write: publish iterates freely
+        return fn
+
+    def unsubscribe(self, fn: Callable[[dict], None]) -> None:
+        self._subs = [(k, f) for k, f in self._subs if f is not fn]
 
     def publish(self, kind: str, data: dict[str, Any] | None = None, t: float | None = None) -> dict:
         with self._lock:
@@ -70,7 +74,7 @@ class LiveBus:
                 if self._fh:
                     self._pending.append(json.dumps(ev, ensure_ascii=False))
                     self._maybe_flush()
-        for kinds, fn in list(self._subs):
+        for kinds, fn in self._subs:
             if kinds is None or kind in kinds:
                 try:
                     fn(ev)

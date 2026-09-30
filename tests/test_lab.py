@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from vidai import lab
-from vidai.lab.examples import ColorMatch, LogisticFrameClassifier
+from vidai.lab.examples import ColorMatch
 
 
 def _color_data(seed=0):
@@ -39,7 +39,8 @@ def test_not_saved_when_not_suitable():
 
 
 def test_classifier_and_code_file_model(tmp_path):
-    code = tmp_path / "bright.py"
+    code = lab.vidai_home() / "work" / "bright.py"  # model code runs only from VidAI's own folders
+    code.parent.mkdir(parents=True, exist_ok=True)
     code.write_text(
         "from vidai.lab.examples import LogisticFrameClassifier\n"
         "class Bright(LogisticFrameClassifier):\n    pass\n")

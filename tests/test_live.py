@@ -141,6 +141,9 @@ def test_pipeline_claude_control_rules_and_file(tmp_path):
             f.write(json.dumps(c) + "\n")
 
     time.sleep(1.2)
+    from vidai import actions
+
+    actions.allow_code(tmp_path)  # the user allowed Claude's effect code in this session
     code = tmp_path / "invert.py"
     code.write_text("from vidai.live.processors import LiveProcessor, register\n"
                     "@register\nclass Invert(LiveProcessor):\n"
@@ -199,6 +202,9 @@ def test_claude_slow_loop_through_service_tools(tmp_path):
     res = service.live_control(s.dir, [{"cmd": "text", "text": "Claude was here", "for": 2},
                                        {"cmd": "mark", "type": "section", "note": "demo"}])
     assert res["missing"] == 0 and all(x["kind"] == "ack" for x in res["results"])
+    from vidai import actions
+
+    actions.allow_code(s.dir)  # the user said yes once ("run effect code written by Claude")
     bad = ("from vidai.live.processors import LiveProcessor, register\n"
            "@register\nclass Tint(LiveProcessor):\n"
            "    def process(self, frame, t, ctx):\n        return frame * undefined_name\n")
@@ -403,6 +409,9 @@ def test_wait_request_and_effect_library(tmp_path):
     assert got["requests"][0]["message"] == "add a spinning planet above me"
     code = ("from vidai.live.processors import LiveProcessor, register\n"
             "@register\nclass Planet(LiveProcessor):\n    def process(self, frame, t, ctx):\n        return frame\n")
+    from vidai import actions
+
+    actions.allow_code(s.dir)
     out = service.live_processor(s.dir, "planet", code, save_as="planet", description="spinning planet")
     assert out["saved_to_library"] == "planet"
     assert "planet" in service.live_effects()["library"]
@@ -439,7 +448,11 @@ def test_preview_effects_carry_into_recording(tmp_path):
     prev = LivePipeline(s.capture, s.live, None, session_dir=s.dir)
     prev.ctx.need_tracking = lambda: None
     prev.start()
-    code = tmp_path / "tint.py"
+    from vidai import actions
+
+    actions.allow_code(s.dir)
+    code = Path(s.dir) / "processors" / "tint.py"
+    code.parent.mkdir(exist_ok=True)
     code.write_text("from vidai.live.processors import LiveProcessor, register\n"
                     "@register\nclass Tint(LiveProcessor):\n    def process(self, frame, t, ctx):\n        return frame\n")
     prev.command({"cmd": "add", "name": "fx_tint", "file": str(code), "params": {"k": 2}})

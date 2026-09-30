@@ -3,7 +3,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from vidai import AnchorFile, Audio, Chapter, ApplyModel, Shape, Subtitle, Text, Zoom, ffmpeg, lab, new_plan
+from vidai import Audio, Chapter, ApplyModel, Shape, Subtitle, Text, Zoom, ffmpeg, lab, new_plan
 from vidai.analyze import analyze
 from vidai.lab.examples import ColorMatch
 from vidai.render import render

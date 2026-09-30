@@ -20,23 +20,27 @@ classifiers = [
   "Topic :: Multimedia :: Video :: Non-Linear Editor",
 ]
 dependencies = [
-  "numpy",
+  "numpy<3",
   "pillow",
-  "pydantic>=2",
+  "pydantic>=2,<3",
   "imageio-ffmpeg",
   "opencv-python-headless",
-  "customtkinter",
+  "customtkinter",          # vidai/gui.py (recorder window) imports it at module top level
   "faster-whisper",
   "rapidocr-onnxruntime",
+  "onnxruntime",            # hub effects / background models (also pulled in by the two above)
+  "huggingface-hub",        # model_search / model hub (also pulled in by faster-whisper)
   "piper-tts",
+  "mcp>=2,<3",              # the MCP server is the core of the Claude Code plugin
 ]
 
 [project.optional-dependencies]
-record = ["obsws-python", "pynput"]
-mcp = ["mcp>=2"]
+record = ["obsws-python", "pynput"]            # OBS backend + global hotkeys (imported lazily, guarded)
+live = ["mediapipe"]                           # hand/face trackers, gestures, selfie segmentation (lazy)
+mcp = []                                       # kept for backwards compat; mcp is now a base dependency
 arabic = ["arabic-reshaper", "python-bidi"]
-dev = ["pytest"]
-all = ["obsws-python", "pynput", "mcp>=2", "arabic-reshaper", "python-bidi", "pytest"]
+dev = ["pytest", "ruff"]
+all = ["vidai-rec[record,live,arabic,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/AlsammanAlsamman/VidAI"
@@ -44,6 +48,7 @@ Issues = "https://github.com/AlsammanAlsamman/VidAI/issues"
 
 [project.scripts]
 vidai = "vidai.cli:main"
+vidai-mcp = "vidai.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["vidai*"]
@@ -54,3 +59,13 @@ vidai = ["assets/*.png", "native/*.c"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: runs Whisper on real speech (downloads a model on first run)"]
+# slow tests are skipped by default; `pytest -m slow` overrides this (the last -m wins)
+addopts = "-m 'not slow'"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# lenient, high-signal only: syntax errors, undefined names, unused imports/vars, mutable defaults
+select = ["E9", "F63", "F7", "F82", "F401", "F841", "B006", "B008"]
