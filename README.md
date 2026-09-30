@@ -12,7 +12,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/status-under%20development-ff3b5c?style=for-the-badge" alt="status: under development">
   <a href="https://pypi.org/project/vidai-rec/"><img src="https://img.shields.io/pypi/v/vidai-rec?color=8b6cff&label=pypi%20vidai-rec&style=for-the-badge" alt="PyPI vidai-rec"></a>
-  <img src="https://img.shields.io/badge/tests-137%20passing-34d399?style=for-the-badge" alt="137 tests passing">
+  <img src="https://img.shields.io/badge/tests-144%20passing-34d399?style=for-the-badge" alt="144 tests passing">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-5b8cff" alt="python 3.10+">
@@ -149,6 +149,19 @@ Nothing fits? Claude searches Hugging Face (`model_search(..., online=True)`) an
 
 ---
 
+## 🧠 Feed models: trained on your own video, locally
+
+VidAI trains small models **on the live camera feed, on your laptop, while you record** — no GPU, no upload.
+A slow *teacher* (a pretrained model, or plain statistics) labels a few frames per second; a tiny *student*
+learns your colours and your light from them and then runs on every frame in ~1 ms. It is used only once its
+score is good enough, and it is saved, so the next session starts trained.
+
+- **Lighting**: stickers and effects take the room's light, tint, camera softness and grain — filmed, not pasted
+- **Hair**: your hair falls in front of things worn on the head (rabbit ears, crowns)
+- Say **"VidAI, make it realistic"**. New feed models follow one protocol: [docs/feed-models.md](docs/feed-models.md)
+
+---
+
 ## 📚 All features
 
 <details>
@@ -232,7 +245,7 @@ Prefer the terminal? `vidai studio` · `vidai analyze video.mkv` · `vidai plan 
 ```bash
 git clone https://github.com/AlsammanAlsamman/VidAI && cd VidAI
 python3 -m venv .venv && .venv/bin/pip install -e ".[all]"
-.venv/bin/python -m pytest -q        # 137 tests (add -m slow for the Whisper tests)
+.venv/bin/python -m pytest -q        # 144 tests (add -m slow for the Whisper tests)
 .venv/bin/ruff check .               # lint (also runs in CI)
 ln -s "$PWD/.venv/bin/vidai-mcp" ~/.local/bin/  # .mcp.json runs `vidai-mcp` from PATH
 node assets/flowchart/flowchart.js   # rebuild the flowchart

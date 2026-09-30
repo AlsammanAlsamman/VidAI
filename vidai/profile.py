@@ -108,6 +108,14 @@ class Profile:
     def macros(self) -> list[dict]:
         return self._load("macros.json", [])
 
+    def clean_macros(self) -> list[str]:
+        """Forget automatic shortcuts that were learned from garbled speech (see plausible_shortcut)."""
+        ms = self.macros()
+        keep = [m for m in ms if m.get("source") == "user" or plausible_shortcut(m["phrase"])]
+        if len(keep) != len(ms):
+            self._save("macros.json", keep)
+        return [m["phrase"] for m in ms if m not in keep]
+
     def add_macro(self, phrase: str, commands: list[dict], source: str = "claude") -> None:
         p = _norm(phrase)
         if not p or not commands:
@@ -183,3 +191,21 @@ class Profile:
                 "preferences": self.prefs(),
                 "frequent_words": self.hotwords(),
                 "recent_sessions": self.history(5)}
+
+
+_VERBS = {"add", "at", "put", "make", "remove", "show", "change", "give", "turn", "set", "move", "write", "draw",
+          "zoom", "blur", "place", "bring", "use", "apply", "hide", "delete", "replace", "create", "display",
+          "take", "switch", "swap"}  # "at" = misheard "add"
+_FILLER = {"and", "please", "vidai", "can", "could", "you", "now", "then", "ok", "okay", "so", "just", "also"}
+
+
+def plausible_shortcut(phrase: str) -> bool:
+    """Is this a clear instruction worth replaying instantly next time? Garbled speech ("to image to making",
+    "and add add add rub it"), rambles and sentences with the wake word inside are not."""
+    w = _norm(phrase).split()
+    while w and w[0] in _FILLER:
+        w = w[1:]
+    if not 2 <= len(w) <= 12 or w[0] not in _VERBS or "vidai" in w:
+        return False
+    return not any(w.count(x) >= 2 for x in set(w) if len(x) > 2 and not x.isdigit())  # stuttered words
+

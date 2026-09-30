@@ -165,6 +165,21 @@ def _hub(t: str, chain) -> list[dict] | None:
     return None
 
 
+def _realistic(t: str, chain) -> list[dict] | None:
+    """"make it realistic" / "blend it in": effects on the head go behind the hair and take the room's light
+    (feed models trained on this video, see vidai.live.feed)."""
+    if not re.search(r"\b(more )?(realistic|real looking|look(s)? real|blend (it |them )?in|natural looking)\b", t):
+        return None
+    worn = [p for p in _fx(chain) if p.params.get("to") in ("head", "above_head", "face", "eyes")
+            or "hair" in p.wants_feeds() or p.name == "fx_rabbit_ears"]
+    stuck = [p for p in _fx(chain) if "realistic" in p.params and p.params.get("to") != "screen"]
+    cmds = [{"cmd": "set", "name": p.name, "params": {"realistic": True, "behind_hair": True}}
+            for p in worn if "behind_hair" in p.params]
+    cmds += [{"cmd": "set", "name": p.name, "params": {"realistic": True}} for p in stuck
+             if p not in worn]
+    return cmds or None
+
+
 def match(text: str, chain) -> list[dict] | None:
     t = " " + re.sub(r"[^\w\s']", " ", text.lower()).strip() + " "
     t = re.sub(r"\s+", " ", t)
@@ -172,6 +187,9 @@ def match(text: str, chain) -> list[dict] | None:
 
     if re.search(r"\b(back to normal|reset everything|clear everything|normal video|no effects|remove all( the)? effects)\b", t):
         return [{"cmd": "remove", "name": p.name} for p in fx] or None
+    real = _realistic(t, chain)
+    if real:
+        return real
     for special in (_background, _picture, _hub):  # checked first: "remove the background" means apply it
         out = special(t, chain)
         if out:

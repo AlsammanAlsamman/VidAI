@@ -65,6 +65,10 @@ Show the user a 3–5 line summary of the config (what you will track and why).
     `blur`, `shape`, `captions`) → `live_effect(session, name)` from the saved library (`live_effects()`) →
     only if nothing fits, `live_processor(session, name, code, save_as=...)` (hands/face are in `ctx.tracks`,
     VidAI downloads models itself). Save new effects with `save_as` so next time is instant.
+    Things drawn *on the person or in the scene* should use feed models (`live_guide("feed")`):
+    `feeds = frozenset({"lighting", "hair"})` + `ctx.composite(...)` so they take the room's light and sit
+    behind the hair. Appearance requests ("change my glasses"): say honestly what an overlay can do and ask
+    before applying — never silently use a cartoon sticker.
   - No checks before answering; keep chat messages to one line while the user records.
   - Requests with `reply: "voice"` come from "VidAI talk" (VidAI said "How can I help you?" and the user asked a
     question): answer OUT LOUD with `live_say(session, "short answer, 1-3 sentences")` — it is spoken with

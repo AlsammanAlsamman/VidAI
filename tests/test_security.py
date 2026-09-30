@@ -45,6 +45,7 @@ def test_wake_flag_from_speech():
     bus = LiveBus()
     stt = SpeechToText.__new__(SpeechToText)  # no Whisper: only the text handling
     stt.bus, stt.wake_words, stt.transcripts, stt.armed_until, stt.arm_seconds = bus, None, [], -1.0, 5.0
+    stt.armed_by = "wake"
 
     class Prof:
         def correct(self, t):  # a poisoned learned correction

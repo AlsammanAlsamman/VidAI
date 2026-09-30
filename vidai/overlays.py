@@ -73,6 +73,42 @@ def _font(size_px: int, text: str, path: str | None) -> ImageFont.FreeTypeFont |
     return ImageFont.load_default(size=size_px)
 
 
+def emoji_runs(text: str) -> list[tuple[bool, str]]:
+    """Split text into (is_emoji, piece) runs; variation selectors / joiners are dropped."""
+    from .live.stickers import _EMOJI_RE
+
+    out: list[tuple[bool, str]] = []
+    for ch in text.replace("\ufe0f", "").replace("\u200d", ""):
+        e = bool(_EMOJI_RE.match(ch))
+        if out and not e and not out[-1][0]:
+            out[-1] = (False, out[-1][1] + ch)
+        else:
+            out.append((e, ch))
+    return out
+
+
+def text_length(draw, text: str, font) -> float:
+    """Width of text where each emoji is one square glyph (text fonts have no emoji)."""
+    size = getattr(font, "size", 15)
+    return sum(size * 1.15 if e else draw.textlength(p, font=font) for e, p in emoji_runs(text))
+
+
+def draw_text(img, draw, xy, text: str, font, fill) -> None:
+    """draw.text that also shows emoji, drawn with the colour-emoji sticker renderer."""
+    from .live.stickers import scaled
+
+    x, y = xy
+    size = getattr(font, "size", 15)
+    for e, piece in emoji_runs(text):
+        if e:
+            spr = PILImage.fromarray(scaled(piece, int(size * 1.15)))
+            img.paste(spr, (int(x), int(y + max(0, (size * 1.2 - spr.height) / 2))), spr)
+            x += size * 1.15
+        else:
+            draw.text((x, y), piece, font=font, fill=fill)
+            x += draw.textlength(piece, font=font)
+
+
 def render_text(op: Text, W: int, H: int) -> PILImage.Image:
     img = PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -81,6 +117,9 @@ def render_text(op: Text, W: int, H: int) -> PILImage.Image:
     lines = op.text.split("\n")
     shaped = [shape_text(line) for line in lines]
     boxes = [d.textbbox((0, 0), s, font=font, **kw) for s, kw in shaped]
+    emoji = [any(e for e, _ in emoji_runs(line)) and not kw for line, (_, kw) in zip(lines, shaped)]
+    boxes = [(b[0], b[1], b[0] + int(text_length(d, line, font)), b[3]) if em else b
+             for b, line, em in zip(boxes, lines, emoji)]
     lh = int(size * 1.25)
     tw = max(b[2] - b[0] for b in boxes)
     th = lh * len(lines)
@@ -90,7 +129,10 @@ def render_text(op: Text, W: int, H: int) -> PILImage.Image:
         d.rounded_rectangle([x, y, x + tw + 2 * pad, y + th + 2 * pad], radius=pad, fill=parse_color(op.box))
     for i, ((s, kw), b) in enumerate(zip(shaped, boxes)):
         lx = x + pad + (tw - (b[2] - b[0])) // 2 - b[0]
-        d.text((lx, y + pad + i * lh - b[1] // 2), s, font=font, fill=parse_color(op.color), **kw)
+        if emoji[i]:  # the text font has no emoji: draw them as colour emoji
+            draw_text(img, d, (lx, y + pad + i * lh - b[1] // 2), lines[i], font, parse_color(op.color))
+        else:
+            d.text((lx, y + pad + i * lh - b[1] // 2), s, font=font, fill=parse_color(op.color), **kw)
     return img
 
 

@@ -119,6 +119,18 @@ Styles/anime are slow live (a few paintings per second); they look best applied 
 5. At the end it is saved to the lab registry (reusable with classify_video on other videos).
 For heavier needs (a real detector, a transform) use the lab: train/train_until_suitable offline, then run it
 live with {"cmd":"add","type":"model","params":{"model":"<name>"}} or your own processor that loads it.""",
+"feed": """Feed models: small models trained on THIS video, locally, while the user records (docs/feed-models.md).
+They make in-scene effects look filmed: `lighting` (room light, tint, camera softness, grain) and `hair`
+(a 1 ms student learned from MediaPipe's hair segmenter on the user's own hair).
+- In a processor: feeds = frozenset({"lighting", "hair"}) (started automatically, shared) and draw with
+  ctx.composite(frame, rgba, x, y, occlude={"hair"}) instead of native.alpha_blend. Before they are ready it
+  is a plain blend; screen graphics (corner titles, captions) keep native.alpha_blend.
+- attach stickers use it already: params realistic (default true), behind_hair (things worn on the head).
+  "VidAI, make it realistic" puts head effects behind the hair.
+- Progress: `feed_model` events {model, ready, score, samples} in live_stats; students are saved to the lab
+  as feed_<key> when the recording stops (next session starts trained).
+- They cannot generate new realistic pixels (real ears, different glasses): be honest about that, and offer
+  a real photo (PNG) through attach instead."""
 }
 
 

@@ -57,12 +57,17 @@ def _rounded(img: Image.Image, radius: int) -> Image.Image:
     return out
 
 
+from .overlays import draw_text as _text  # noqa: E402  (text with emoji: the UI font has none)
+from .overlays import emoji_runs as _runs  # noqa: E402,F401
+from .overlays import text_length as _tlen  # noqa: E402
+
+
 def _wrap(draw, text: str, font, width: int) -> list[str]:
     """Split text into lines that fit `width` pixels (word wrap; very long words are cut)."""
     lines, cur = [], ""
     for word in text.split():
         cand = f"{cur} {word}".strip()
-        if draw.textlength(cand, font=font) <= width:
+        if _tlen(draw, cand, font) <= width:
             cur = cand
             continue
         if cur:
@@ -350,12 +355,12 @@ class RecorderApp:
             parts = _wrap(d, text, self._f_small, PREVIEW_W - 60)
             if len(parts) > 2:
                 parts = [parts[0], parts[1][:-1] + "…"]
-            w = max(d.textlength(p, font=self._f_small) for p in parts)
+            w = max(_tlen(d, p, self._f_small) for p in parts)
             h = 10 + 20 * len(parts)
             y -= h + 6
             d.rounded_rectangle([12, y, 12 + w + 24, y + h], 12, fill=(10, 10, 20, 200))
             for i, part in enumerate(parts):
-                d.text((24, y + 4 + 20 * i), part, font=self._f_small, fill=color)
+                _text(img, d, (24, y + 4 + 20 * i), part, self._f_small, color)
         ask, q = self.ask, self.question  # the bus thread may clear them meanwhile
         pending = (f"{self.session.live.address}, I need to {ask[1]}", WARN) if ask else (
             ((q[1] if q[1].startswith("💡") else f"Claude asks: {q[1]}"), ACCENT_2) if q else None)
@@ -365,13 +370,13 @@ class RecorderApp:
             d.rounded_rectangle([12, 58, PREVIEW_W - 12, 58 + h], 12, fill=(10, 10, 20, 215),
                                 outline=pending[1], width=2)
             for i, part in enumerate(parts):
-                d.text((24, 64 + 20 * i), part, font=self._f_small, fill=pending[1])
+                _text(img, d, (24, 64 + 20 * i), part, self._f_small, pending[1])
         if self.flash:
             text, color, _ = self.flash
-            w = d.textlength(text, font=self._f_badge)
+            w = _tlen(d, text, self._f_badge)
             x = PREVIEW_W - w - 44
             d.rounded_rectangle([x, 14, PREVIEW_W - 14, 50], 18, fill=(0, 0, 0, 160))
-            d.text((x + 15, 18), text, font=self._f_badge, fill=color)
+            _text(img, d, (x + 15, 18), text, self._f_badge, color)
         return img
 
     def _show(self, img: Image.Image) -> None:

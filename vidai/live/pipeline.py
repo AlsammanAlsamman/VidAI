@@ -436,6 +436,10 @@ class LivePipeline(CommandsMixin, DialogMixin, UndoMixin, MemoryMixin, GovernorM
                 cap.send_signal(signal.SIGINT)
             if self.mic:
                 self.mic.terminate()
+            try:  # with the mic piped in (parec), ffmpeg catches SIGINT but keeps going; SIGTERM ends it cleanly
+                cap.wait(2)
+            except subprocess.TimeoutExpired:
+                cap.send_signal(signal.SIGTERM)
         for p in self._procs:
             try:
                 p.wait(timeout)

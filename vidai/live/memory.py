@@ -80,6 +80,10 @@ class MemoryMixin:
                                                               "rule", "mark") for c in p["cmds"]):
                     continue  # set/remove/enable... depend on what is on screen now: replayed later they'd be wrong
                 if (not p["names"]) or any(q is not None and q.enabled for q in alive):
+                    from ..profile import plausible_shortcut
+
+                    if not plausible_shortcut(p["msg"]):
+                        continue  # garbled or rambling speech: never an instant shortcut
                     self.profile.add_macro(p["msg"], p["cmds"])
                     self._learned("macro", request=p["msg"])
 
@@ -109,6 +113,7 @@ class MemoryMixin:
         for p in list(self._probation):  # keep what was not removed by the end
             p["t_done"] = -1e9
         self._check_probation()
+        self.profile.clean_macros()  # anything learned from garbled speech goes
         stop = {"that", "this", "with", "have", "from", "will", "what", "your", "they", "about", "there", "then",
                 "vidai", "here", "just", "like", "going", "want", "make", "more", "some", "into", "them"}
         words = collections.Counter(w for tr in (self.stt.transcripts if self.stt else [])

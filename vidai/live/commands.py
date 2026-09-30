@@ -272,6 +272,8 @@ class CommandsMixin:
         if not p:
             raise KeyError(f"no processor {c['name']!r}")
         p.configure(c.get("params", {}))
+        self.chain.ensure_feeds(p)  # e.g. behind_hair switched on
+        self.chain.prune_feeds()
         return {"name": p.name, "params": p.params}
 
     def _cmd_rule(self, cmd: str, c: dict, t: float, until: float | None) -> dict | None:
@@ -341,7 +343,7 @@ class CommandsMixin:
         self.say(f"{self.live.address}, I need to {text}. Say VidAI confirm, or VidAI deny.")
         self.bus.publish("action", {"what": "asking", "request": rid, "text": text})
         if self.stt:  # a bare "yes" / "confirm" right after the question is enough
-            self.stt.armed_until = self._audio_now() + 25
+            self.stt.arm(self._audio_now() + 25, "ask")
         return {"request": rid, "state": "pending"}
 
     def _cmd_confirm(self, cmd: str, c: dict, t: float, until: float | None) -> dict | None:
@@ -397,7 +399,7 @@ class CommandsMixin:
         self._talk = True
         self.say("How can I help you?")
         if self.stt:  # no wake word needed for the question (armed after VidAI stops talking)
-            self.stt.armed_until = max(self._audio_now(), self.speaking_until) + 10
+            self.stt.arm(max(self._audio_now(), self.speaking_until) + 10, "talk")
         self.notify("🎙 Ask your question…", "listen", 8)
         return {"talk": True}
 
@@ -452,7 +454,7 @@ class CommandsMixin:
             opts = self.questions[qid]["options"]
             self.say(c["text"] + (" Options: " + ", ".join(opts) + "." if opts else ""))
         if self.stt:
-            self.stt.armed_until = self._audio_now() + 30
+            self.stt.arm(self._audio_now() + 30, "question")
         return {"question": qid}
 
     def _cmd_cancel_question(self, cmd: str, c: dict, t: float, until: float | None) -> dict | None:
