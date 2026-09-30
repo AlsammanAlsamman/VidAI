@@ -237,6 +237,7 @@ class SpeechToText:
         self.transcripts: list[dict] = []
         self.profile = None  # vidai.profile.Profile: user's words (recognition) and learned corrections
         self.armed_until = -1.0  # after a bare "VidAI", the next utterance within a few seconds is the command
+        self.armed_by = "wake"  # why it listens without the wake word: wake | listen | talk | question | ask | suggest
         self.arm_seconds = 5.0
         self.min_speech = 0.35
         self._th = threading.Thread(target=self._run, daemon=True)
@@ -307,14 +308,16 @@ class SpeechToText:
             text = self.profile.correct(text)
         cmd = parse_command(text, self.wake_words)
         if cmd and cmd["command"] == "claude" and not cmd["args"]:  # just "VidAI": listen for the command
-            self.armed_until = end + self.arm_seconds
+            self.arm(end + self.arm_seconds, "wake")
             ev = {"text": text, "start": round(start, 2), "end": round(end, 2), "lang": lang, "is_command": True}
             self.transcripts.append(ev)
             self.bus.publish("transcript", ev, end)
             self.bus.publish("action", {"what": "listening", "until": round(self.armed_until, 2)}, end)
             return
+        armed = None
         if cmd is None and start <= self.armed_until:
             cmd = parse_command("vidai " + text, None)
+            armed = self.armed_by
         self.armed_until = -1.0 if cmd else self.armed_until
         ev = {"text": text, "start": round(start, 2), "end": round(end, 2), "lang": lang,
               "is_command": cmd is not None}
@@ -323,7 +326,12 @@ class SpeechToText:
         if cmd:
             # "wake": the user really said "VidAI <this command>" (needed for full access)
             wake = bool(raw and raw["command"] == cmd["command"])
-            self.bus.publish("voice_command", {**cmd, "text": text, "wake": wake}, end)
+            self.bus.publish("voice_command", {**cmd, "text": text, "wake": wake, "armed": armed}, end)
+
+    def arm(self, until: float, why: str) -> None:
+        """Listen without the wake word until `until` (audio time). `why` decides what counts: after VidAI's own
+        question only answers and commands do; after "VidAI", push-to-talk or "VidAI talk" anything does."""
+        self.armed_until, self.armed_by = until, why
 
     def flush(self, timeout: float = 30.0) -> None:
         """Wait until queued utterances are transcribed (at the end of a recording)."""

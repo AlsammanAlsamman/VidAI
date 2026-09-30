@@ -452,7 +452,8 @@ def test_self_hearing_guard_uses_the_audio_clock(tmp_path):
     pl = _pipe(tmp_path)
     pl.start()
     got = []
-    pl.stt = type("S", (), {"submit": lambda self, *a: got.append(a), "enabled": True, "armed_until": -1})()
+    pl.stt = type("S", (), {"submit": lambda self, *a: got.append(a), "enabled": True, "armed_until": -1,
+                            "arm": lambda self, until, why: setattr(self, "armed_until", until)})()
     pl.audio.written = 16000 * 50  # audio clock at 50 s while the video clock is ~0 s
     assert pl._audio_now() == pytest.approx(50.0)
     pl.speaking_until = pl._audio_now() + 3  # VidAI talking now (audio time)

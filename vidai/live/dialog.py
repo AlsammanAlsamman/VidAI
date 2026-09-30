@@ -51,6 +51,11 @@ class DialogMixin:
                 self.command({"cmd": "answer", "text": args}, source="voice")
                 return
             # not one of the options: it's a new request, the question stays open
+        if cmd == "claude" and d.get("armed") in ("question", "ask", "suggest"):
+            # heard while VidAI waited for an answer, without "VidAI": chatter, not a request for Claude
+            self.bus.publish("action", {"what": "ignored_chatter", "text": d.get("text", "")})
+            self.notify("Didn't catch an answer — say “VidAI …” for a new request", "info", 3)
+            return
         if cmd in ("undo", "redo", "help", "lighter"):
             self.command({"cmd": cmd}, source="voice")
             return
@@ -159,7 +164,7 @@ class DialogMixin:
     def listen(self, seconds: float = 6.0) -> None:
         """Push-to-talk: the next thing the user says is a command (no wake word needed)."""
         if self.stt:
-            self.stt.armed_until = self._audio_now() + seconds
+            self.stt.arm(self._audio_now() + seconds, "listen")
         self.notify("🎙 Listening… say the command", "listen", seconds)
 
     def _on_speech_for_request(self, ev: dict) -> None:
@@ -364,7 +369,7 @@ class DialogMixin:
                       "text": f"💡 {item['title']}  ({i + 1}/{len(st['items'])})"}, source="suggest")
         self.say(f"{item['title']}?")
         if self.stt:  # "next" / "confirm" / "cancel" without the wake word
-            self.stt.armed_until = max(self._audio_now(), self.speaking_until) + 15
+            self.stt.arm(max(self._audio_now(), self.speaking_until) + 15, "suggest")
 
     def _suggest_answer(self, ans: str) -> None:
         st = self.suggesting

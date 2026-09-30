@@ -57,12 +57,48 @@ def _rounded(img: Image.Image, radius: int) -> Image.Image:
     return out
 
 
+def _runs(text: str) -> list[tuple[bool, str]]:
+    """Split text into (is_emoji, piece) runs; variation selectors / joiners are dropped."""
+    from .live.stickers import _EMOJI_RE
+
+    out: list[tuple[bool, str]] = []
+    for ch in text.replace("\ufe0f", "").replace("\u200d", ""):
+        e = bool(_EMOJI_RE.match(ch))
+        if out and not e and not out[-1][0]:
+            out[-1] = (False, out[-1][1] + ch)
+        else:
+            out.append((e, ch))
+    return out
+
+
+def _tlen(draw, text: str, font) -> float:
+    """Width of text where emoji count as one square glyph (the UI font has none)."""
+    size = getattr(font, "size", 15)
+    return sum(size + 3 if e else draw.textlength(p, font=font) for e, p in _runs(text))
+
+
+def _text(img, draw, xy, text: str, font, fill) -> None:
+    """draw.text that also shows emoji (drawn with the sticker renderer: the UI font has no emoji)."""
+    from .live.stickers import scaled
+
+    x, y = xy
+    size = getattr(font, "size", 15)
+    for e, piece in _runs(text):
+        if e:
+            spr = Image.fromarray(scaled(piece, size + 3))
+            img.paste(spr, (int(x), int(y + max(0, (size + 4 - spr.height) / 2))), spr)
+            x += size + 3
+        else:
+            draw.text((x, y), piece, font=font, fill=fill)
+            x += draw.textlength(piece, font=font)
+
+
 def _wrap(draw, text: str, font, width: int) -> list[str]:
     """Split text into lines that fit `width` pixels (word wrap; very long words are cut)."""
     lines, cur = [], ""
     for word in text.split():
         cand = f"{cur} {word}".strip()
-        if draw.textlength(cand, font=font) <= width:
+        if _tlen(draw, cand, font) <= width:
             cur = cand
             continue
         if cur:
@@ -350,12 +386,12 @@ class RecorderApp:
             parts = _wrap(d, text, self._f_small, PREVIEW_W - 60)
             if len(parts) > 2:
                 parts = [parts[0], parts[1][:-1] + "…"]
-            w = max(d.textlength(p, font=self._f_small) for p in parts)
+            w = max(_tlen(d, p, self._f_small) for p in parts)
             h = 10 + 20 * len(parts)
             y -= h + 6
             d.rounded_rectangle([12, y, 12 + w + 24, y + h], 12, fill=(10, 10, 20, 200))
             for i, part in enumerate(parts):
-                d.text((24, y + 4 + 20 * i), part, font=self._f_small, fill=color)
+                _text(img, d, (24, y + 4 + 20 * i), part, self._f_small, color)
         ask, q = self.ask, self.question  # the bus thread may clear them meanwhile
         pending = (f"{self.session.live.address}, I need to {ask[1]}", WARN) if ask else (
             ((q[1] if q[1].startswith("💡") else f"Claude asks: {q[1]}"), ACCENT_2) if q else None)
@@ -365,13 +401,13 @@ class RecorderApp:
             d.rounded_rectangle([12, 58, PREVIEW_W - 12, 58 + h], 12, fill=(10, 10, 20, 215),
                                 outline=pending[1], width=2)
             for i, part in enumerate(parts):
-                d.text((24, 64 + 20 * i), part, font=self._f_small, fill=pending[1])
+                _text(img, d, (24, 64 + 20 * i), part, self._f_small, pending[1])
         if self.flash:
             text, color, _ = self.flash
-            w = d.textlength(text, font=self._f_badge)
+            w = _tlen(d, text, self._f_badge)
             x = PREVIEW_W - w - 44
             d.rounded_rectangle([x, 14, PREVIEW_W - 14, 50], 18, fill=(0, 0, 0, 160))
-            d.text((x + 15, 18), text, font=self._f_badge, fill=color)
+            _text(img, d, (x + 15, 18), text, self._f_badge, color)
         return img
 
     def _show(self, img: Image.Image) -> None:
